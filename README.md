@@ -1,73 +1,64 @@
-# Welcome to your Lovable project
+# Classmate Connect
 
-## Project info
+Platform modules:
+- Schedule comparison
+- Timetable generation
+- Students-by-courses finder
+- Friends/enemies overlap foundation
 
-**URL**: https://lovable.dev/projects/REPLACE_WITH_PROJECT_ID
+## Project structure
 
-## How can I edit this code?
+- `backend/` Express + SQLite + scraper + migration + auth
+- `src/` Frontend app (Vite + React)
+- `scripts/` utility scripts (including DB update trigger)
+- `frontend/` marker folder for frontend app structure
 
-There are several ways of editing your application.
+## Quick start
 
-**Use Lovable**
-
-Simply visit the [Lovable Project](https://lovable.dev/projects/REPLACE_WITH_PROJECT_ID) and start prompting.
-
-Changes made via Lovable will be committed automatically to this repo.
-
-**Use your preferred IDE**
-
-If you want to work locally using your own IDE, you can clone this repo and push changes. Pushed changes will also be reflected in Lovable.
-
-The only requirement is having Node.js & npm installed - [install with nvm](https://github.com/nvm-sh/nvm#installing-and-updating)
-
-Follow these steps:
-
+1. Install root dependencies:
 ```sh
-# Step 1: Clone the repository using the project's Git URL.
-git clone <YOUR_GIT_URL>
-
-# Step 2: Navigate to the project directory.
-cd <YOUR_PROJECT_NAME>
-
-# Step 3: Install the necessary dependencies.
-npm i
-
-# Step 4: Start the development server with auto-reloading and an instant preview.
-npm run dev
+npm install
 ```
 
-**Edit a file directly in GitHub**
+2. Install backend dependencies:
+```sh
+npm --prefix backend install
+```
 
-- Navigate to the desired file(s).
-- Click the "Edit" button (pencil icon) at the top right of the file view.
-- Make your changes and commit the changes.
+3. Configure backend env:
+- Copy `backend/.env.example` to `backend/.env`
+- Set `ADMIN_EMAIL` to your email
+- Keep/change `ADMIN_PASSWORD` (default `adminpass`)
 
-**Use GitHub Codespaces**
+4. Seed admin account:
+```sh
+npm --prefix backend run init-admin
+```
 
-- Navigate to the main page of your repository.
-- Click on the "Code" button (green button) near the top right.
-- Select the "Codespaces" tab.
-- Click on "New codespace" to launch a new Codespace environment.
-- Edit files directly within the Codespace and commit and push your changes once you're done.
+5. Run frontend + backend together:
+```sh
+npm run dev:full
+```
 
-## What technologies are used for this project?
+## Scripts
 
-This project is built with:
+- `npm run dev:frontend` → frontend only
+- `npm run dev:backend` → backend only
+- `npm run dev:full` → run both
+- `npm run update:db` → login as admin then call `/api/update`
 
-- Vite
-- TypeScript
-- React
-- shadcn-ui
-- Tailwind CSS
+## Automatic update pipeline
 
-## How can I deploy this project?
+`POST /api/update` runs:
+1. scrape `https://stds.eng.cu.edu.eg/ClassList.aspx?s=1`
+2. write snapshot to `backend/data/master_schedule.csv`
+3. migrate into normalized SQLite schema
 
-Simply open [Lovable](https://lovable.dev/projects/REPLACE_WITH_PROJECT_ID) and click on Share -> Publish.
+Response status:
+- `success` scrape + migration done
+- `partial` scrape done, migration failed
+- `error` scrape failed or empty data
 
-## Can I connect a custom domain to my Lovable project?
+## Frontend API config
 
-Yes, you can!
-
-To connect a domain, navigate to Project > Settings > Domains and click Connect Domain.
-
-Read more here: [Setting up a custom domain](https://docs.lovable.dev/features/custom-domain#custom-domain)
+Set `VITE_API_BASE_URL` (default: `http://localhost:4000`).

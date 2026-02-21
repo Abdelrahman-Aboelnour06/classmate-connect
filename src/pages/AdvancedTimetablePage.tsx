@@ -1,14 +1,13 @@
+"use client";
+
 import { useMemo, useState } from "react";
 import PageLayout from "@/components/PageLayout";
 import ScheduleGrid from "@/components/ScheduleGrid";
 import { useQuery } from "@tanstack/react-query";
-import { generateTimetables, getAllCourses } from "@/lib/api";
+import { generateTimetables, getAllCourses, formatTime } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { formatTime } from "@/lib/api";
-import { Grid2x2, List, Clock } from "lucide-react";
-import { Switch } from "@/components/ui/switch";
-import { Label } from "@/components/ui/label";
+import { Grid2x2, List } from "lucide-react";
 
 type Session = {
   course_code: string;
@@ -21,86 +20,13 @@ type Session = {
   group_number: string | null;
 };
 
-// Ramadan timing conversion map (standard -> ramadan)
-const RAMADAN_TIME_MAP: Record<string, string> = {
-  "08:00": "08:00",
-  "09:00": "08:45",
-  "10:00": "09:30",
-  "11:00": "10:15",
-  "12:00": "11:00",
-  "13:00": "11:45",
-  "14:00": "12:30",
-  "15:00": "13:15",
-  "16:00": "14:00",
-  "17:00": "14:45",
-  "18:00": "15:30",
-  "19:00": "16:15",
-  "20:00": "16:15",
-  "21:00": "16:15",
-};
-
-// Normalize times ending in :50 by adding 10 minutes
-function normalizeTime(time: string): string {
-  let [hour, minute] = time.split(":").map(Number);
-  
-  if (minute === 50) {
-    minute = 0;
-    hour += 1;
-  }
-  
-  return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
-}
-
-function convertToRamadanTime(time: string): { time: string; requiresMakeup: boolean } {
-  const [hourStr, minuteStr] = time.split(":");
-  const hour = parseInt(hourStr);
-  const minute = parseInt(minuteStr);
-  
-  // Check if requires makeup (classes at or after 20:00)
-  const requiresMakeup = hour >= 20;
-  
-  // Cap at 16:15 for classes that require makeup
-  if (requiresMakeup) {
-    return { time: "16:15", requiresMakeup: true };
-  }
-  
-  // Time is already in Ramadan format, return as-is
-  return { time, requiresMakeup: false };
-}
-
-function calculateRamadanEndTime(startTime: string, endTime: string): string {
-  // Parse original start time (Ramadan timing in DB)
-  const [startHour, startMinute] = startTime.split(":").map(Number);
-  const startTotalMinutes = startHour * 60 + startMinute;
-  
-  // Parse original end time (already normalized)
-  const [endHour, endMinute] = endTime.split(":").map(Number);
-  const endTotalMinutes = endHour * 60 + endMinute;
-  
-  // Calculate original duration from normal timing
-  const durationMinutes = endTotalMinutes - startTotalMinutes;
-  
-  // Apply 0.75 multiplier to duration
-  const ramadanDuration = durationMinutes * 0.75;
-  
-  // Add to start time
-  const ramadanEndMinutes = startTotalMinutes + ramadanDuration;
-  
-  // Convert back to hours and minutes
-  const ramadanEndHour = Math.floor(ramadanEndMinutes / 60);
-  const ramadanEndMinute = Math.round(ramadanEndMinutes % 60);
-  
-  return `${String(ramadanEndHour).padStart(2, "0")}:${String(ramadanEndMinute).padStart(2, "0")}`;
-}
-
-export default function TimetablePage() {
+export default function AdvancedTimetablePage() {
   const [selectedCourses, setSelectedCourses] = useState<string[]>([]);
   const [filter, setFilter] = useState("");
   const [index, setIndex] = useState(0);
   const [result, setResult] = useState<{ total: number; current_index: number; has_next: boolean; timetable: Session[] } | null>(null);
   const [loading, setLoading] = useState(false);
   const [viewMode, setViewMode] = useState<"grid" | "list">("grid");
-  const [isRamadanTiming, setIsRamadanTiming] = useState(false);
 
   const coursesQuery = useQuery({
     queryKey: ["all-courses"],
@@ -117,76 +43,31 @@ export default function TimetablePage() {
   }, [coursesQuery.data, filter]);
 
   const toggleCourse = (code: string) => {
-    setSelectedCourses((current) => {
-      const updated = current.includes(code) ? current.filter((item) => item !== code) : [...current, code];
-      console.log("📚 Courses updated:", updated);
-      return updated;
-    });
+    setSelectedCourses((current) =>
+      current.includes(code) ? current.filter((item) => item !== code) : [...current, code],
+    );
   };
 
   const runGeneration = async (nextIndex = 0) => {
-    if (!selectedCourses.length) {
-      console.log("No courses selected");
-      return;
-    }
-    console.log("🚀 Starting timetable generation with courses:", selectedCourses);
+    if (!selectedCourses.length) return;
     setLoading(true);
     try {
       const data = await generateTimetables(selectedCourses, nextIndex, 100);
-      console.log("✅ Response received:", data);
       setResult(data);
       setIndex(data.current_index);
-      console.log("✅ State updated successfully");
-    } catch (error) {
-      console.error("❌ Error generating timetables:", error);
+    } catch {
       setResult(null);
     } finally {
       setLoading(false);
     }
   };
 
-  // Convert timetable sessions for display based on timing mode
-  const displayTimetable = useMemo(() => {
-    if (!result) return null;
-    
-    // Normalize times ending in :50 for all sessions, but keep originals
-    const normalizedSessions = result.timetable.map((session) => ({
-      ...session,
-      original_start_time: session.start_time,
-      original_end_time: session.end_time,
-      start_time: normalizeTime(session.start_time),
-      end_time: normalizeTime(session.end_time),
-    }));
-
-    if (!isRamadanTiming) return normalizedSessions;
-    
-    return normalizedSessions.map(session => ({
-      ...session,
-      start_time: convertToRamadanTime(session.start_time).time,
-      end_time: calculateRamadanEndTime(session.start_time, session.end_time),
-    }));
-  }, [result, isRamadanTiming]);
-
   return (
     <PageLayout title="Timetable Generator">
       <div className="max-w-5xl mx-auto space-y-6">
-        <div className="flex items-start justify-between">
-          <div>
-            <h2 className="font-display text-2xl font-bold text-foreground">Timetable Generator</h2>
-            <p className="mt-1 text-sm text-muted-foreground">Select courses, then generate conflict-free timetable options.</p>
-          </div>
-          
-          <div className="flex items-center gap-3 rounded-lg border border-border bg-card px-4 py-3">
-            <Clock className="h-4 w-4 text-muted-foreground" />
-            <Label htmlFor="ramadan-toggle" className="text-sm font-medium cursor-pointer">
-              {isRamadanTiming ? "Ramadan Timing" : "Standard Timing"}
-            </Label>
-            <Switch
-              id="ramadan-toggle"
-              checked={isRamadanTiming}
-              onCheckedChange={setIsRamadanTiming}
-            />
-          </div>
+        <div>
+          <h2 className="font-display text-2xl font-bold text-foreground">Timetable Generator</h2>
+          <p className="mt-1 text-sm text-muted-foreground">Select courses, then generate conflict-free timetable options.</p>
         </div>
 
         <div className="rounded-xl border border-border bg-card p-4 space-y-3">
@@ -254,21 +135,11 @@ export default function TimetablePage() {
               </div>
             </div>
 
-            {isRamadanTiming && (
-              <div className="rounded-lg bg-amber-50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-800 px-4 py-3">
-                <p className="text-sm text-amber-800 dark:text-amber-200">
-                  <Clock className="inline h-4 w-4 mr-2" />
-                  <strong>Ramadan Timing:</strong> Contact hours reduced to 45 minutes (40 min study + 5 min break). 
-                  Classes ending after 7:00 PM are adjusted to 4:15 PM and require makeup coordination.
-                </p>
-              </div>
-            )}
-
             {viewMode === "grid" ? (
-              <ScheduleGrid schedule={displayTimetable || []} />
+              <ScheduleGrid schedule={result.timetable} />
             ) : (
               <div className="space-y-2">
-                {displayTimetable.map((session, idx) => (
+                {result.timetable.map((session, idx) => (
                   <div key={idx} className="rounded-lg border border-border px-3 py-2 text-sm">
                     <div className="flex items-center justify-between">
                       <span className="font-medium">{session.course_code} • {session.class_type}</span>

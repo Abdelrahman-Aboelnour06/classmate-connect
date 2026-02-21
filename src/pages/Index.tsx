@@ -1,5 +1,6 @@
 import { Link } from "react-router-dom";
 import { Calendar, Users, Search, Heart, Upload, ArrowRight } from "lucide-react";
+import ThemeToggle from "@/components/ThemeToggle";
 
 const modules = [
   {
@@ -42,15 +43,9 @@ const Index = () => {
             <div className="h-10 w-10 rounded-lg gradient-amber flex items-center justify-center">
               <Calendar className="h-5 w-5 text-secondary-foreground" />
             </div>
-            <h1 className="font-display text-xl font-bold text-primary-foreground">CU Schedule</h1>
+            <h1 className="font-display text-xl font-bold text-primary-foreground dark:text-cyan-400">Schedule Sync</h1>
           </div>
-          <Link
-            to="/upload"
-            className="flex items-center gap-2 rounded-lg bg-secondary px-4 py-2 text-sm font-medium text-secondary-foreground transition-all hover:opacity-90"
-          >
-            <Upload className="h-4 w-4" />
-            Upload Data
-          </Link>
+          <ThemeToggle />
         </div>
       </header>
 
@@ -60,7 +55,7 @@ const Index = () => {
           <h2
             className="font-display text-4xl font-bold tracking-tight text-foreground sm:text-5xl animate-fade-in"
           >
-            Cairo University
+            cairo university
             <span className="block text-secondary">Schedule Platform</span>
           </h2>
           <p
@@ -72,29 +67,39 @@ const Index = () => {
         </section>
 
         {/* Module cards */}
-        <section className="grid gap-6 pb-20 sm:grid-cols-2 lg:grid-cols-4">
+        <section className="grid gap-6 pb-10 sm:grid-cols-2 lg:grid-cols-4">
           {modules.map((mod) => (
             <Link
               key={mod.path}
               to={mod.path}
-              className="group relative overflow-hidden rounded-xl border border-border bg-card p-6 shadow-card transition-all duration-300 hover:shadow-card-hover hover:-translate-y-1 animate-fade-in"
+              className="group relative overflow-hidden rounded-xl border border-border bg-card p-8 shadow-card transition-all duration-300 hover:shadow-card-hover hover:-translate-y-1 animate-fade-in"
               style={{ animationDelay: mod.delay }}
             >
-              <div className="mb-4 inline-flex rounded-lg gradient-amber p-3">
-                <mod.icon className="h-5 w-5 text-secondary-foreground" />
+              <div className="mb-4 inline-flex rounded-lg gradient-amber p-4">
+                <mod.icon className="h-6 w-6 text-secondary-foreground" />
               </div>
-              <h3 className="font-display text-lg font-semibold text-card-foreground">
+              <h3 className="font-display text-xl font-semibold text-card-foreground">
                 {mod.title}
               </h3>
-              <p className="mt-2 text-sm text-muted-foreground leading-relaxed">
+              <p className="mt-2 text-base text-muted-foreground leading-relaxed">
                 {mod.description}
               </p>
-              <div className="mt-4 flex items-center gap-1 text-sm font-medium text-secondary transition-all group-hover:gap-2">
+              <div className="mt-4 flex items-center gap-1 text-base font-medium text-secondary transition-all group-hover:gap-2">
                 Explore
-                <ArrowRight className="h-4 w-4" />
+                <ArrowRight className="h-5 w-5" />
               </div>
             </Link>
           ))}
+        </section>
+
+        <section className="pb-20 flex justify-center animate-fade-in" style={{ animationDelay: "0.45s" }}>
+          <Link
+            to="/upload"
+            className="flex items-center gap-2 rounded-lg bg-secondary px-5 py-3 text-sm font-medium text-secondary-foreground transition-all hover:opacity-90"
+          >
+            <Upload className="h-4 w-4" />
+            Upload Data
+          </Link>
         </section>
       </main>
     </div>

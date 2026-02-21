@@ -1,8 +1,8 @@
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=Inter:wght@300;400;500;600;700&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
-
-@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=Inter:wght@300;400;500;600;700&display=swap');
 
 @layer base {
   :root {
@@ -61,25 +61,25 @@
 
   .dark {
     --background: 220 30% 8%;
-    --foreground: 220 10% 93%;
+    --foreground: 180 70% 45%;
 
     --card: 220 30% 12%;
-    --card-foreground: 220 10% 93%;
+    --card-foreground: 180 70% 45%;
 
     --popover: 220 30% 12%;
-    --popover-foreground: 220 10% 93%;
+    --popover-foreground: 180 70% 45%;
 
     --primary: 45 90% 55%;
     --primary-foreground: 220 60% 12%;
 
     --secondary: 220 30% 18%;
-    --secondary-foreground: 220 10% 90%;
+    --secondary-foreground: 180 70% 45%;
 
     --muted: 220 25% 16%;
-    --muted-foreground: 220 10% 55%;
+    --muted-foreground: 180 50% 45%;
 
     --accent: 220 30% 18%;
-    --accent-foreground: 220 10% 90%;
+    --accent-foreground: 180 70% 45%;
 
     --destructive: 0 62.8% 30.6%;
     --destructive-foreground: 0 0% 100%;
@@ -89,11 +89,11 @@
     --ring: 45 90% 55%;
 
     --sidebar-background: 220 30% 8%;
-    --sidebar-foreground: 220 10% 90%;
+    --sidebar-foreground: 180 70% 45%;
     --sidebar-primary: 45 90% 55%;
     --sidebar-primary-foreground: 220 60% 12%;
     --sidebar-accent: 220 25% 16%;
-    --sidebar-accent-foreground: 220 10% 90%;
+    --sidebar-accent-foreground: 180 70% 45%;
     --sidebar-border: 220 25% 16%;
     --sidebar-ring: 45 90% 55%;
   }

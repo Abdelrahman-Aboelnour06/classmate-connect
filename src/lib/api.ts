@@ -1,6 +1,3 @@
-import { supabase } from "@/integrations/supabase/client";
-
-// Arabic normalization: أ/إ/آ→ا, ة→ه, ى→ي
 export function normalizeArabic(text: string): string {
   return text
     .replace(/[أإآ]/g, "ا")
@@ -24,6 +21,50 @@ export function formatTime(time: string): string {
   return `${displayHour}:${m} ${ampm}`;
 }
 
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:4000";
+
+async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
+  let response: Response;
+  console.log(`📡 API Request: ${init?.method || "GET"} ${path}`, init?.body ? JSON.parse(init.body as string) : "");
+  
+  try {
+    response = await fetch(`${API_BASE_URL}${path}`, {
+      ...init,
+      headers: {
+        "content-type": "application/json",
+        ...(init?.headers || {}),
+      },
+    });
+  } catch (error) {
+    console.error("❌ Fetch error:", error);
+    throw new Error(`Cannot reach API at ${API_BASE_URL}. Make sure backend is running.`);
+  }
+
+  if (!response.ok) {
+    const text = await response.text();
+    console.error(`❌ API Error (${response.status}):`, text);
+    let message = text || `Request failed: ${response.status}`;
+
+    try {
+      const parsed = JSON.parse(text);
+      // Check both 'error' and 'message' fields for error message
+      if (parsed?.error) {
+        message = parsed.error;
+      } else if (parsed?.message) {
+        message = parsed.message;
+      }
+    } catch {
+      // If JSON parsing fails, use the raw text
+    }
+
+    throw new Error(message);
+  }
+
+  const result = await response.json() as T;
+  console.log(`✅ API Response:`, result);
+  return result;
+}
+
 export type StudentScheduleRecord = {
   student_id: string;
   student_name: string;
@@ -36,96 +77,137 @@ export type StudentScheduleRecord = {
   end_time: string;
   location: string | null;
   group_number: string | null;
+  instructor?: string;
+  original_start_time?: string;
+  original_end_time?: string;
 };
 
 export async function searchStudents(query: string): Promise<Array<{ student_id: string; student_name: string; student_name_ar: string | null }>> {
-  const normalized = normalizeArabic(query);
-  
-  const { data, error } = await supabase
-    .from("students")
-    .select("student_id, student_name, student_name_ar")
-    .or(`student_name.ilike.%${query}%,student_id.ilike.%${query}%,student_name_ar.ilike.%${normalized}%`)
-    .limit(20);
-
-  if (error) throw error;
-  return data || [];
+  return apiRequest(`/api/search/students?q=${encodeURIComponent(query)}`);
 }
 
-export async function getStudentSchedule(studentId: string): Promise<StudentScheduleRecord[]> {
-  const { data: student } = await supabase
-    .from("students")
-    .select("id, student_id, student_name, student_name_ar")
-    .eq("student_id", studentId)
-    .single();
-
-  if (!student) return [];
-
-  const { data: schedules, error } = await supabase
-    .from("schedules")
-    .select(`
-      class_id,
-      classes:class_id (
-        id,
-        location,
-        group_number,
-        course_id,
-        time_slot_id,
-        class_type_id,
-        courses:course_id (course_code, course_name),
-        time_slots:time_slot_id (day_of_week, start_time, end_time),
-        class_types:class_type_id (type_name)
-      )
-    `)
-    .eq("student_id", student.id);
-
-  if (error) throw error;
-  if (!schedules) return [];
-
-  return schedules.map((s: any) => ({
-    student_id: student.student_id,
-    student_name: student.student_name,
-    student_name_ar: student.student_name_ar,
-    course_code: s.classes.courses.course_code,
-    course_name: s.classes.courses.course_name,
-    class_type: s.classes.class_types.type_name,
-    day_of_week: s.classes.time_slots.day_of_week,
-    start_time: s.classes.time_slots.start_time,
-    end_time: s.classes.time_slots.end_time,
-    location: s.classes.location,
-    group_number: s.classes.group_number,
-  }));
+export async function getStudentSchedule(studentQuery: string, strict = false): Promise<StudentScheduleRecord[]> {
+  return apiRequest(
+    `/api/search/schedule?query=${encodeURIComponent(studentQuery)}&strict=${strict ? "1" : "0"}`,
+  );
 }
 
 export async function getAllCourses(): Promise<Array<{ course_code: string; course_name: string }>> {
-  const { data, error } = await supabase
-    .from("courses")
-    .select("course_code, course_name")
-    .order("course_code");
-
-  if (error) throw error;
-  return data || [];
+  return apiRequest("/api/courses");
 }
 
 export async function getClassmates(courseCode: string, excludeStudentId?: string): Promise<Array<{ student_id: string; student_name: string; student_name_ar: string | null }>> {
-  const { data: course } = await supabase
-    .from("courses")
-    .select("id")
-    .eq("course_code", courseCode)
-    .single();
-
-  if (!course) return [];
-
-  const { data: enrollments, error } = await supabase
-    .from("enrollments")
-    .select(`
-      students:student_id (student_id, student_name, student_name_ar)
-    `)
-    .eq("course_id", course.id);
-
-  if (error) throw error;
-  if (!enrollments) return [];
-
-  return enrollments
-    .map((e: any) => e.students)
-    .filter((s: any) => !excludeStudentId || s.student_id !== excludeStudentId);
+  return apiRequest(
+    `/api/classmates?courseCode=${encodeURIComponent(courseCode)}${excludeStudentId ? `&excludeStudentId=${encodeURIComponent(excludeStudentId)}` : ""}`,
+  );
 }
+
+export async function getClassStudents(
+  courseCode: string,
+  classType: string,
+  dayOfWeek: string,
+  startTime: string,
+  groupNumber?: string | null
+): Promise<Array<{ student_id: string; student_name: string; student_name_ar: string | null }>> {
+  const params = new URLSearchParams({
+    courseCode,
+    classType,
+    dayOfWeek,
+    startTime,
+  });
+  
+  if (groupNumber) {
+    params.append('groupNumber', groupNumber);
+  }
+  
+  return apiRequest(`/api/class-students?${params.toString()}`);
+}
+
+export async function loginAdmin(email: string, password: string): Promise<{ token: string; admin: { email: string } }> {
+  return apiRequest("/api/auth/login", {
+    method: "POST",
+    body: JSON.stringify({ email, password }),
+  });
+}
+
+export async function runFullUpdate(token: string): Promise<any> {
+  return apiRequest("/api/update", {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${token}`,
+    },
+  });
+}
+
+export async function uploadCsvAndMigrate(token: string, csv: string): Promise<any> {
+  return apiRequest("/api/upload-csv", {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({ csv }),
+  });
+}
+
+export async function generateTimetables(selectedCourses: string[], index = 0, maxResults = 50): Promise<{ 
+  current_index: number; 
+  total: number; 
+  has_next: boolean; 
+  timetable: Array<{
+    course_code: string;
+    course_name: string;
+    class_type: string;
+    day_of_week: string;
+    start_time: string;
+    end_time: string;
+    location: string | null;
+    group_number: string | null;
+  }>
+}> {
+  console.log("📤 generateTimetables called with:", { selectedCourses, index, maxResults });
+  return apiRequest("/api/timetables", {
+    method: "POST",
+    body: JSON.stringify({ selectedCourses, index, maxResults }),
+  });
+}
+
+export async function findStudentsByCourses(courseCodes: string[], matchType: "all" | "any") {
+  return apiRequest<{ count: number; students: Array<{ student_id: string; student_name: string; student_name_ar: string | null }> }>(
+    "/api/students-by-courses",
+    {
+      method: "POST",
+      body: JSON.stringify({ courseCodes, matchType }),
+    },
+  );
+}
+
+export type FriendsAndEnemiesAnalysis = {
+  student_id: string;
+  student_name: string;
+  course_code: string;
+  course_name: string;
+  class_type: string;
+  day_of_week: string;
+  start_time: string;
+  end_time: string;
+  location: string | null;
+  group_number: string | null;
+  category: "friends-only" | "enemies-only" | "both" | "alone";
+  friends: StudentScheduleRecord[];
+  enemies: StudentScheduleRecord[];
+};
+
+export async function analyzeFriendsAndEnemies(
+  studentId: string,
+  friendIds: string[],
+  enemyIds: string[]
+): Promise<{ analysis: FriendsAndEnemiesAnalysis[] }> {
+  return apiRequest(
+    "/api/friends-and-enemies/analyze",
+    {
+      method: "POST",
+      body: JSON.stringify({ studentId, friendIds, enemyIds }),
+    }
+  );
+}
+
