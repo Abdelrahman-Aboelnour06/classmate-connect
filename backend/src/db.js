@@ -2,7 +2,7 @@ import Database from "better-sqlite3";
 import path from "node:path";
 import fs from "node:fs";
 
-const dbPath = path.join(process.cwd(), "backend", "data", "classmate-connect.db");
+const dbPath = process.env.DB_PATH || path.join(process.cwd(), "backend", "data", "classmate-connect.db");
 fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 
 export const db = new Database(dbPath);
@@ -75,6 +75,32 @@ CREATE TABLE IF NOT EXISTS admins (
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE VIRTUAL TABLE IF NOT EXISTS student_search USING fts5(
+  student_id UNINDEXED,
+  student_name,
+  student_name_ar,
+  student_name_normalized,
+  content='students',
+  content_rowid='id'
+);
+
+CREATE TRIGGER IF NOT EXISTS students_ai AFTER INSERT ON students BEGIN
+  INSERT INTO student_search(rowid, student_id, student_name, student_name_ar, student_name_normalized)
+  VALUES (new.id, new.student_id, new.student_name, new.student_name_ar, new.student_name_normalized);
+END;
+
+CREATE TRIGGER IF NOT EXISTS students_ad AFTER DELETE ON students BEGIN
+  INSERT INTO student_search(student_search, rowid, student_id, student_name, student_name_ar, student_name_normalized)
+  VALUES ('delete', old.id, old.student_id, old.student_name, old.student_name_ar, old.student_name_normalized);
+END;
+
+CREATE TRIGGER IF NOT EXISTS students_au AFTER UPDATE ON students BEGIN
+  INSERT INTO student_search(student_search, rowid, student_id, student_name, student_name_ar, student_name_normalized)
+  VALUES ('delete', old.id, old.student_id, old.student_name, old.student_name_ar, old.student_name_normalized);
+  INSERT INTO student_search(rowid, student_id, student_name, student_name_ar, student_name_normalized)
+  VALUES (new.id, new.student_id, new.student_name, new.student_name_ar, new.student_name_normalized);
+END;
+
 CREATE INDEX IF NOT EXISTS idx_students_student_id ON students(student_id);
 CREATE INDEX IF NOT EXISTS idx_students_student_name ON students(student_name);
 CREATE INDEX IF NOT EXISTS idx_students_student_name_ar ON students(student_name_ar);
@@ -89,3 +115,5 @@ CREATE INDEX IF NOT EXISTS idx_enrollments_course_id ON enrollments(course_id);
 CREATE INDEX IF NOT EXISTS idx_schedules_student_id ON schedules(student_id);
 CREATE INDEX IF NOT EXISTS idx_schedules_class_id ON schedules(class_id);
 `);
+
+db.prepare("INSERT INTO student_search(student_search) VALUES ('rebuild')").run();

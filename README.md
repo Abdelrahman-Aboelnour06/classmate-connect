@@ -29,6 +29,7 @@ npm --prefix backend install
 - Copy `backend/.env.example` to `backend/.env`
 - Set `ADMIN_EMAIL` to your email
 - Keep/change `ADMIN_PASSWORD` (default `adminpass`)
+- Set `JWT_SECRET` to a long random secret. The backend refuses to start without it.
 
 4. Seed admin account:
 ```sh
@@ -39,6 +40,8 @@ npm --prefix backend run init-admin
 ```sh
 npm run dev:full
 ```
+
+Regular users can register at `/user-login`. Accounts are stored in `backend/data/users.db`, separate from the admin database. Registration requires accepting `/terms` and a password with at least 12 characters, including uppercase, lowercase, and a number.
 
 ## Scripts
 

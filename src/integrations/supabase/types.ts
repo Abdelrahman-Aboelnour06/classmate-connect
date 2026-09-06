@@ -78,6 +78,36 @@ export type Database = {
           },
         ]
       }
+      course_statistics: {
+        Row: {
+          id: number
+          course_code: string
+          semester: string
+          program: string
+          grade: string
+          student_count: number
+          created_at: string | null
+        }
+        Insert: {
+          id?: number
+          course_code: string
+          semester: string
+          program: string
+          grade: string
+          student_count: number
+          created_at?: string | null
+        }
+        Update: {
+          id?: number
+          course_code?: string
+          semester?: string
+          program?: string
+          grade?: string
+          student_count?: number
+          created_at?: string | null
+        }
+        Relationships: []
+      }
       courses: {
         Row: {
           course_code: string

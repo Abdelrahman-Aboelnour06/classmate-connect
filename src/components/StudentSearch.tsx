@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { searchStudents } from "@/lib/api";
 import { Input } from "@/components/ui/input";
-import { Search } from "lucide-react";
+import { MagnifyingGlass } from "@phosphor-icons/react";
 
 type Student = { student_id: string; student_name: string; student_name_ar: string | null };
 
@@ -98,7 +98,7 @@ export default function StudentSearch({ label, onSelect, selected, placeholder }
     <div className="relative space-y-1.5" ref={containerRef}>
       <label className="text-sm font-medium text-foreground">{label}</label>
       <div className="relative">
-        <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+            <MagnifyingGlass weight="bold" className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
         <Input
           value={query}
           onChange={(e) => setQuery(e.target.value)}
@@ -118,7 +118,7 @@ export default function StudentSearch({ label, onSelect, selected, placeholder }
               }`}
             >
               <span className="font-medium text-card-foreground">{student.student_name}</span>
-              <span className="ml-2 text-xs text-muted-foreground">{student.student_id}</span>
+              <span className="ml-2 font-mono text-xs text-muted-foreground">{student.student_id}</span>
               {student.student_name_ar && (
                 <span className="float-right text-xs text-muted-foreground">{student.student_name_ar}</span>
               )}

@@ -4,23 +4,23 @@ type AuthContextValue = {
   token: string | null;
   adminEmail: string | null;
   isAuthenticated: boolean;
-  setAuth: (token: string, adminEmail: string) => void;
+  setAuth: (token: string | null, adminEmail: string) => void;
   logout: () => void;
 };
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [token, setToken] = useState<string | null>(() => localStorage.getItem("admin_token"));
+  const [token, setToken] = useState<string | null>(null);
   const [adminEmail, setAdminEmail] = useState<string | null>(() => localStorage.getItem("admin_email"));
 
   const value = useMemo<AuthContextValue>(
     () => ({
       token,
       adminEmail,
-      isAuthenticated: Boolean(token),
+      isAuthenticated: Boolean(adminEmail),
       setAuth: (nextToken, email) => {
-        localStorage.setItem("admin_token", nextToken);
+        localStorage.removeItem("admin_token");
         localStorage.setItem("admin_email", email);
         setToken(nextToken);
         setAdminEmail(email);

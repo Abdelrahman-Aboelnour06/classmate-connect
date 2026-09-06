@@ -4,7 +4,8 @@ import ScheduleGrid from "@/components/ScheduleGrid";
 import ComparisonScheduleGrid from "@/components/ComparisonScheduleGrid";
 import StudentSearch from "@/components/StudentSearch";
 import { getStudentSchedule, StudentScheduleRecord, formatTime } from "@/lib/api";
-import { Loader2, CheckCircle2, ArrowLeftRight, Clock, Grid2x2, List } from "lucide-react";
+import { convertToRamadanSessionTiming } from "@/lib/ramadan-timing";
+import { ArrowsLeftRight as ArrowLeftRight, CheckCircle as CheckCircle2, CircleNotch as Loader2, Clock, List, SquaresFour as Grid2x2 } from "@phosphor-icons/react";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
@@ -12,24 +13,6 @@ import { Label } from "@/components/ui/label";
 type Student = { student_id: string; student_name: string; student_name_ar: string | null };
 
 const DAYS = ["Saturday", "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday"];
-
-// Ramadan timing conversion map (standard -> ramadan)
-const RAMADAN_TIME_MAP: Record<string, string> = {
-  "08:00": "08:00",
-  "09:00": "08:45",
-  "10:00": "09:30",
-  "11:00": "10:15",
-  "12:00": "11:00",
-  "13:00": "11:45",
-  "14:00": "12:30",
-  "15:00": "13:15",
-  "16:00": "14:00",
-  "17:00": "14:45",
-  "18:00": "15:30",
-  "19:00": "16:15",
-  "20:00": "16:15",
-  "21:00": "16:15",
-};
 
 // Normalize times ending in :50 by adding 10 minutes
 function normalizeTime(time: string): string {
@@ -41,48 +24,6 @@ function normalizeTime(time: string): string {
   }
   
   return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
-}
-
-function convertToRamadanTime(time: string): { time: string; requiresMakeup: boolean } {
-  const [hourStr, minuteStr] = time.split(":");
-  const hour = parseInt(hourStr);
-  const minute = parseInt(minuteStr);
-  
-  // Check if requires makeup (classes at or after 20:00)
-  const requiresMakeup = hour >= 20;
-  
-  // Cap at 16:15 for classes that require makeup
-  if (requiresMakeup) {
-    return { time: "16:15", requiresMakeup: true };
-  }
-  
-  // Time is already in Ramadan format, return as-is
-  return { time, requiresMakeup: false };
-}
-
-function calculateRamadanEndTime(startTime: string, endTime: string): string {
-  // Parse original start time (Ramadan timing in DB)
-  const [startHour, startMinute] = startTime.split(":").map(Number);
-  const startTotalMinutes = startHour * 60 + startMinute;
-  
-  // Parse original end time (already normalized)
-  const [endHour, endMinute] = endTime.split(":").map(Number);
-  const endTotalMinutes = endHour * 60 + endMinute;
-  
-  // Calculate original duration from normal timing
-  const durationMinutes = endTotalMinutes - startTotalMinutes;
-  
-  // Apply 0.75 multiplier to duration
-  const ramadanDuration = durationMinutes * 0.75;
-  
-  // Add to start time
-  const ramadanEndMinutes = startTotalMinutes + ramadanDuration;
-  
-  // Convert back to hours and minutes
-  const ramadanEndHour = Math.floor(ramadanEndMinutes / 60);
-  const ramadanEndMinute = Math.round(ramadanEndMinutes % 60);
-  
-  return `${String(ramadanEndHour).padStart(2, "0")}:${String(ramadanEndMinute).padStart(2, "0")}`;
 }
 
 export default function ComparePage() {
@@ -116,6 +57,18 @@ export default function ComparePage() {
     }
   };
 
+  const handleClassmateSelect = async (student: Student) => {
+    if (!studentA) {
+      return;
+    }
+
+    if (student.student_id === studentA.student_id) {
+      return;
+    }
+
+    await handleSelectB(student);
+  };
+
   // Convert schedules for display based on timing mode
   const displayScheduleA = useMemo(() => {
     // Normalize times ending in :50 for all sessions, but keep originals
@@ -129,11 +82,14 @@ export default function ComparePage() {
 
     if (!isRamadanTiming) return normalizedSchedule;
 
-    return normalizedSchedule.map((session) => ({
-      ...session,
-      start_time: convertToRamadanTime(session.start_time).time,
-      end_time: calculateRamadanEndTime(session.start_time, session.end_time),
-    }));
+    return normalizedSchedule.map((session) => {
+      const converted = convertToRamadanSessionTiming(session.start_time, session.end_time);
+      return {
+        ...session,
+        start_time: converted.startTime,
+        end_time: converted.endTime,
+      };
+    });
   }, [scheduleA, isRamadanTiming]);
 
   const displayScheduleB = useMemo(() => {
@@ -148,11 +104,14 @@ export default function ComparePage() {
 
     if (!isRamadanTiming) return normalizedSchedule;
 
-    return normalizedSchedule.map((session) => ({
-      ...session,
-      start_time: convertToRamadanTime(session.start_time).time,
-      end_time: calculateRamadanEndTime(session.start_time, session.end_time),
-    }));
+    return normalizedSchedule.map((session) => {
+      const converted = convertToRamadanSessionTiming(session.start_time, session.end_time);
+      return {
+        ...session,
+        start_time: converted.startTime,
+        end_time: converted.endTime,
+      };
+    });
   }, [scheduleB, isRamadanTiming]);
 
   const analysis = useMemo(() => {
@@ -270,7 +229,7 @@ export default function ComparePage() {
             <div className="rounded-xl border border-border bg-card p-4 shadow-card">
               <div className="flex items-center gap-2 text-secondary">
                 <CheckCircle2 className="h-5 w-5" />
-                <span className="font-display font-semibold">Shared Courses</span>
+                <span className="font-display font-semibold">Shared Classes</span>
               </div>
               <p className="mt-2 text-2xl font-bold text-card-foreground">{analysis.sharedCourses.length}</p>
               <p className="text-xs text-muted-foreground mt-1">{analysis.sharedCourses.join(", ") || "None"}</p>
@@ -337,7 +296,11 @@ export default function ComparePage() {
                     <div className="mb-4 space-y-1 text-sm">
                       <div className="flex items-center gap-2">
                         <div className="w-4 h-4 rounded" style={{ backgroundColor: "rgb(134 239 172)" }} />
-                        <span className="text-muted-foreground">Shared Course (Both students)</span>
+                        <span className="text-muted-foreground">Shared Class (Same room)</span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <div className="w-4 h-4 rounded" style={{ backgroundColor: "rgb(253 186 116)" }} />
+                        <span className="text-muted-foreground">Same course & time, different room</span>
                       </div>
                       <div className="flex items-center gap-2">
                         <div className="w-4 h-4 rounded" style={{ backgroundColor: "rgb(219 234 254)" }} />
@@ -354,6 +317,7 @@ export default function ComparePage() {
                       exactMatches={analysis?.exactMatches || []}
                       studentAName={studentA?.student_name || "Student A"}
                       studentBName={studentB?.student_name || "Student B"}
+                      onClassmateSelect={handleClassmateSelect}
                     />
                   </div>
                 ) : (
@@ -363,7 +327,11 @@ export default function ComparePage() {
                         <h3 className="font-display text-lg font-semibold text-foreground mb-3">
                           {studentA?.student_name || "Student A"}
                         </h3>
-                        <ScheduleGrid schedule={displayScheduleA} highlightCourses={new Set(analysis?.exactMatches.map(e => e.course_code) || [])} />
+                        <ScheduleGrid
+                          schedule={displayScheduleA}
+                          highlightCourses={new Set(analysis?.exactMatches.map(e => e.course_code) || [])}
+                          onClassmateSelect={handleClassmateSelect}
+                        />
                       </div>
                     )}
                     {scheduleB.length > 0 && (

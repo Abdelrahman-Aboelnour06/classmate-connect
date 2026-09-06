@@ -7,7 +7,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Users, Loader2 } from "lucide-react";
+import { CircleNotch as Loader2, UsersThree as Users } from "@phosphor-icons/react";
 import { useQuery } from "@tanstack/react-query";
 
 const DAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
@@ -22,12 +22,18 @@ function getMinuteOffset(time: string): number {
   return minute;
 }
 
+function getTimeInMinutes(time: string): number {
+  const [hour, minute] = time.split(":").map(Number);
+  return hour * 60 + minute;
+}
+
 interface ComparisonScheduleGridProps {
   scheduleA: StudentScheduleRecord[];
   scheduleB: StudentScheduleRecord[];
   exactMatches: StudentScheduleRecord[];
   studentAName?: string;
   studentBName?: string;
+  onClassmateSelect?: (student: { student_id: string; student_name: string; student_name_ar: string | null }) => void;
 }
 
 export default function ComparisonScheduleGrid({
@@ -36,6 +42,7 @@ export default function ComparisonScheduleGrid({
   exactMatches,
   studentAName = "Student A",
   studentBName = "Student B",
+  onClassmateSelect,
 }: ComparisonScheduleGridProps) {
   const [selectedClass, setSelectedClass] = useState<StudentScheduleRecord | null>(null);
 
@@ -109,12 +116,16 @@ export default function ComparisonScheduleGrid({
   }, [scheduleB, timeSlots]);
 
   const getClassHeight = (item: StudentScheduleRecord) => {
-    const startHour = getTimeSlotIndex(item.start_time);
-    const endHour = getTimeSlotIndex(item.end_time);
-    const endMinute = getMinuteOffset(item.end_time);
-    let duration = endHour - startHour;
-    if (endMinute > 0) duration += endMinute / 60;
-    return `${Math.max(duration * 4, 4)}rem`;
+    const durationMinutes = Math.max(
+      getTimeInMinutes(item.end_time) - getTimeInMinutes(item.start_time),
+      30,
+    );
+    return `${(durationMinutes / 60) * 4}rem`;
+  };
+
+  const getClassTop = (time: string, stackIndex = 0) => {
+    const minuteOffsetRem = (getMinuteOffset(time) / 60) * 4;
+    return `${0.5 + minuteOffsetRem + stackIndex * 0.25}rem`;
   };
 
   return (
@@ -140,12 +151,31 @@ export default function ComparisonScheduleGrid({
             {DAYS.map((day) => {
               const itemsA = gridA[day][slot];
               const itemsB = gridB[day][slot];
-              const matchedA = itemsA.filter((a) =>
+              // Exact match: same course, time, AND room
+              const exactMatchedA = itemsA.filter((a) =>
                 itemsB.some(
                   (b) =>
                     a.course_code === b.course_code &&
                     a.day_of_week === b.day_of_week &&
-                    a.start_time === b.start_time
+                    a.start_time === b.start_time &&
+                    a.location === b.location
+                )
+              );
+              // Same course & time but different room
+              const diffRoomMatchedA = itemsA.filter((a) =>
+                itemsB.some(
+                  (b) =>
+                    a.course_code === b.course_code &&
+                    a.day_of_week === b.day_of_week &&
+                    a.start_time === b.start_time &&
+                    a.location !== b.location
+                ) &&
+                !itemsB.some(
+                  (b) =>
+                    a.course_code === b.course_code &&
+                    a.day_of_week === b.day_of_week &&
+                    a.start_time === b.start_time &&
+                    a.location === b.location
                 )
               );
               const nonMatchedA = itemsA.filter((a) =>
@@ -170,8 +200,8 @@ export default function ComparisonScheduleGrid({
                   key={`${day}-${slot}`}
                   className="border-r border-border px-2 py-2 min-h-16 text-xs space-y-1 relative bg-white dark:bg-slate-950"
                 >
-                  {/* Matched courses (full width, green) - stack vertically with offset */}
-                  {matchedA.map((item, idx) => (
+                  {/* Exact matched courses (same room, full width, green) */}
+                  {exactMatchedA.map((item, idx) => (
                     <div
                       key={`match-${idx}`}
                       onClick={() => setSelectedClass(item)}
@@ -179,9 +209,9 @@ export default function ComparisonScheduleGrid({
                       style={{
                         minHeight: getClassHeight(item),
                         zIndex: 10 + idx,
-                        top: `${0.5 + idx * 0.25}rem`,
-                        backgroundColor: "rgb(134 239 172)", // green for match
-                        borderColor: "rgb(52 211 153)", // green border
+                        top: getClassTop(item.start_time, idx),
+                        backgroundColor: "rgb(134 239 172)", // green for exact match
+                        borderColor: "rgb(52 211 153)",
                       }}
                     >
                       <div className="font-semibold leading-tight text-green-900">{item.course_code}</div>
@@ -189,9 +219,44 @@ export default function ComparisonScheduleGrid({
                       <div className="text-xs opacity-75 leading-tight text-green-800">
                         {item.start_time} - {item.end_time}
                       </div>
-                      <div className="text-xs font-medium text-green-900 mt-1">Shared Course</div>
+                      {item.location && <div className="text-xs opacity-75 leading-tight text-green-800">{item.location}</div>}
+                      <div className="text-xs font-medium text-green-900 mt-1">Shared Class</div>
                     </div>
                   ))}
+
+                  {/* Same course & time but different room (orange) */}
+                  {diffRoomMatchedA.map((item, idx) => {
+                    const matchingB = itemsB.find(
+                      (b) =>
+                        item.course_code === b.course_code &&
+                        item.day_of_week === b.day_of_week &&
+                        item.start_time === b.start_time
+                    );
+                    return (
+                      <div
+                        key={`diff-room-${idx}`}
+                        onClick={() => setSelectedClass(item)}
+                        className="rounded-lg border p-1.5 text-xs transition-colors absolute w-[calc(100%-0.5rem)] cursor-pointer hover:shadow-lg"
+                        style={{
+                          minHeight: getClassHeight(item),
+                          zIndex: 10 + exactMatchedA.length + idx,
+                          top: getClassTop(item.start_time, exactMatchedA.length + idx),
+                          backgroundColor: "rgb(253 186 116)", // orange for different room
+                          borderColor: "rgb(251 146 60)",
+                        }}
+                      >
+                        <div className="font-semibold leading-tight text-orange-900">{item.course_code}</div>
+                        <div className="text-xs opacity-75 leading-tight text-orange-800">{item.class_type}</div>
+                        <div className="text-xs opacity-75 leading-tight text-orange-800">
+                          {item.start_time} - {item.end_time}
+                        </div>
+                        <div className="text-xs font-medium text-orange-900 mt-1">Different Room</div>
+                        <div className="text-xs opacity-75 leading-tight text-orange-800">
+                          {item.location || "?"} / {matchingB?.location || "?"}
+                        </div>
+                      </div>
+                    );
+                  })}
 
                   {/* Non-matched courses (split left/right) - stack within their side */}
                   {nonMatchedA.map((item, idx) => (
@@ -203,7 +268,7 @@ export default function ComparisonScheduleGrid({
                         minHeight: getClassHeight(item),
                         zIndex: 1 + idx,
                         left: "1px",
-                        top: `${0.5 + idx * 0.25}rem`,
+                        top: getClassTop(item.start_time, idx),
                         width: "calc(50% - 0.25rem)",
                         backgroundColor: "rgb(219 234 254)", // light blue for Student A
                         borderColor: "rgb(147 197 253)", // blue border
@@ -225,7 +290,7 @@ export default function ComparisonScheduleGrid({
                         minHeight: getClassHeight(item),
                         zIndex: 1 + idx,
                         left: "50%",
-                        top: `${0.5 + idx * 0.25}rem`,
+                        top: getClassTop(item.start_time, idx),
                         width: "calc(50% - 0.25rem)",
                         backgroundColor: "rgb(236 201 75)", // yellow for Student B
                         borderColor: "rgb(202 138 4)", // amber border
@@ -252,9 +317,14 @@ export default function ComparisonScheduleGrid({
               <Users className="h-5 w-5" />
               Classmates in {selectedClass?.course_code}
             </DialogTitle>
-            <DialogDescription>
-              {selectedClass?.class_type} • {selectedClass?.day_of_week} at {selectedClass?.start_time}
-              {selectedClass?.group_number && ` • Group ${selectedClass.group_number}`}
+            <DialogDescription className="space-y-1">
+              {selectedClass?.course_name && (
+                <span className="block text-foreground">{selectedClass.course_name}</span>
+              )}
+              <span className="block">
+                {selectedClass?.class_type} • {selectedClass?.day_of_week} at {selectedClass?.start_time}
+                {selectedClass?.group_number && ` • Group ${selectedClass.group_number}`}
+              </span>
             </DialogDescription>
           </DialogHeader>
 
@@ -272,7 +342,11 @@ export default function ComparisonScheduleGrid({
                   {classmates.map((student) => (
                     <div
                       key={student.student_id}
-                      className="p-3 rounded-lg bg-muted/50 hover:bg-muted transition-colors"
+                      className="p-3 rounded-lg bg-muted/50 hover:bg-muted transition-colors cursor-pointer"
+                      onClick={() => {
+                        onClassmateSelect?.(student);
+                        setSelectedClass(null);
+                      }}
                     >
                       <div className="font-medium text-sm">{student.student_name}</div>
                       <div className="text-xs text-muted-foreground">{student.student_id}</div>

@@ -4,22 +4,64 @@ import fs from "node:fs";
 import express from "express";
 import cors from "cors";
 import bcrypt from "bcryptjs";
+import helmet from "helmet";
+import rateLimit from "express-rate-limit";
+import XLSX from "xlsx";
 import { z } from "zod";
 import { db } from "./db.js";
 import { normalizeArabic } from "./utils.js";
 import { migrateCsvToDb } from "./migration.js";
 import { scrapeToMasterCsv } from "./scraper.js";
-import { requireAdmin, signAdminToken } from "./auth.js";
-import { buildTimetableCombinations } from "./advanced-timetable.js";
+import {
+  clearAdminSessionCookie,
+  clearUserSessionCookie,
+  createCsrfToken,
+  csrfProtection,
+  requireAdmin,
+  requireUser,
+  setAdminSessionCookie,
+  setUserSessionCookie,
+  signAdminToken,
+} from "./auth.js";
+import { queries } from "./queries.js";
+import { createUserSession, deleteUserSession, usersDb } from "./users-db.js";
 
 const app = express();
+const isProduction = process.env.NODE_ENV === "production";
+app.set("trust proxy", 1);
+app.use(helmet());
+app.use((req, res, next) => {
+  if (isProduction && req.headers["x-forwarded-proto"] !== "https") {
+    return res.redirect(`https://${req.headers.host}${req.originalUrl}`);
+  }
+  next();
+});
+if (isProduction) app.use(helmet.hsts({ maxAge: 31536000, includeSubDomains: true }));
 app.use(express.json({ limit: "5mb" }));
+
+let coursesCache = null;
+
+function invalidateReadCaches() {
+  coursesCache = null;
+}
+
+function buildFtsQuery(value) {
+  return String(value)
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((term) => `"${term.replaceAll('"', '""')}"*`)
+    .join(" AND ");
+}
 
 function isAllowedOrigin(origin) {
   if (!origin) return true;
 
   const explicitOrigins = [process.env.FRONTEND_ORIGIN || "http://localhost:8080", "http://localhost:5173"];
   if (explicitOrigins.includes(origin)) return true;
+
+  // Allow Cloudflare quick tunnel subdomains for temporary sharing.
+  if (/^https:\/\/[a-z0-9-]+\.trycloudflare\.com$/i.test(origin)) return true;
 
   return /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin);
 }
@@ -37,21 +79,127 @@ app.use(
     credentials: true,
   }),
 );
+app.use(csrfProtection);
+
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 20,
+  standardHeaders: "draft-8",
+  legacyHeaders: false,
+  message: { error: "Too many authentication attempts" },
+});
+const accountAuthLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 10,
+  standardHeaders: "draft-8",
+  legacyHeaders: false,
+  keyGenerator: (req) => String(req.body?.email || req.body?.identifier || "unknown").trim().toLowerCase(),
+  message: { error: "Too many authentication attempts" },
+});
+
+const userEmail = z.string().trim().toLowerCase().email().max(254);
+const username = z.string().trim().regex(/^[A-Za-z0-9_]{3,24}$/);
+const password = z
+  .string()
+  .min(12)
+  .max(128)
+  .regex(/[a-z]/)
+  .regex(/[A-Z]/)
+  .regex(/[0-9]/);
+const botCheck = z.object({ website: z.string().max(0), startedAt: z.number().int().positive() }).strict();
+
+function passesBotCheck(body) {
+  return body.website === "" && Number.isFinite(body.startedAt) && Date.now() - body.startedAt >= 800;
+}
+
+const findUserByEmailQuery = usersDb.prepare("SELECT id, email, username, password_hash FROM users WHERE email = ?");
+const findUserByUsernameQuery = usersDb.prepare("SELECT id, email, username, password_hash FROM users WHERE username = ?");
+const findAdminByEmailQuery = db.prepare("SELECT id, email, password_hash FROM admins WHERE email = ?");
+const insertUserQuery = usersDb.prepare(`
+  INSERT INTO users (email, username, password_hash, terms_accepted_at)
+  VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+`);
+
+app.get("/api/auth/csrf", (_req, res) => {
+  res.json({ token: createCsrfToken(res) });
+});
 
 app.get("/api/health", (_req, res) => res.json({ ok: true }));
 
-app.post("/api/auth/login", async (req, res) => {
-  const schema = z.object({ email: z.string().email(), password: z.string().min(1) });
+app.post("/api/auth/login", authLimiter, accountAuthLimiter, async (req, res) => {
+  const schema = z.object({ email: userEmail, password: z.string().min(1), ...botCheck.shape }).strict();
   const parsed = schema.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: "Invalid login payload" });
+  if (!parsed.success || !passesBotCheck(parsed.data)) return res.status(401).json({ error: "Invalid credentials" });
 
-  const admin = db.prepare("SELECT id, email, password_hash FROM admins WHERE email = ?").get(parsed.data.email);
+  const admin = findAdminByEmailQuery.get(parsed.data.email);
   if (!admin) return res.status(401).json({ error: "Invalid credentials" });
 
   const valid = await bcrypt.compare(parsed.data.password, admin.password_hash);
   if (!valid) return res.status(401).json({ error: "Invalid credentials" });
 
-  return res.json({ token: signAdminToken(admin), admin: { email: admin.email } });
+  setAdminSessionCookie(res, signAdminToken(admin));
+  return res.json({ admin: { email: admin.email } });
+});
+
+app.post("/api/auth/logout", (req, res) => {
+  clearAdminSessionCookie(res);
+  res.status(204).end();
+});
+
+app.post("/api/users/register", authLimiter, accountAuthLimiter, async (req, res) => {
+  const schema = z
+    .object({ email: userEmail, username, password, termsAccepted: z.literal(true), ...botCheck.shape })
+    .strict();
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success || !passesBotCheck(parsed.data)) return res.status(400).json({ error: "Invalid registration details" });
+
+  try {
+    const passwordHash = await bcrypt.hash(parsed.data.password, 12);
+    const result = insertUserQuery.run(parsed.data.email, parsed.data.username, passwordHash);
+    const session = createUserSession(Number(result.lastInsertRowid));
+    setUserSessionCookie(res, session.token, 12 * 60 * 60 * 1000);
+    return res.status(201).json({ user: { email: parsed.data.email, username: parsed.data.username } });
+  } catch {
+    return res.status(400).json({ error: "Unable to create account" });
+  }
+});
+
+app.post("/api/users/login", authLimiter, accountAuthLimiter, async (req, res) => {
+  const schema = z.object({ identifier: z.string().trim().min(3).max(254), password: z.string().min(1), ...botCheck.shape }).strict();
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success || !passesBotCheck(parsed.data)) return res.status(401).json({ error: "Invalid credentials" });
+
+  const identifier = parsed.data.identifier.toLowerCase();
+  if (identifier === process.env.ADMIN_EMAIL.toLowerCase()) {
+    const admin = findAdminByEmailQuery.get(identifier);
+    const validAdmin = admin ? await bcrypt.compare(parsed.data.password, admin.password_hash) : false;
+    if (admin && validAdmin) {
+      setAdminSessionCookie(res, signAdminToken(admin));
+      return res.json({ user: { email: admin.email, username: "admin" }, admin: true });
+    }
+  }
+
+  const user = identifier.includes("@")
+    ? findUserByEmailQuery.get(identifier)
+    : findUserByUsernameQuery.get(parsed.data.identifier);
+  const valid = user ? await bcrypt.compare(parsed.data.password, user.password_hash) : false;
+  if (!user || !valid) return res.status(401).json({ error: "Invalid credentials" });
+
+  const session = createUserSession(user.id);
+  setUserSessionCookie(res, session.token, 12 * 60 * 60 * 1000);
+  return res.json({ user: { email: user.email, username: user.username } });
+});
+
+app.get("/api/users/me", requireUser, (req, res) => {
+  res.json({ user: { email: req.user.email, username: req.user.username } });
+});
+
+app.post("/api/users/logout", (req, res) => {
+  const cookieHeader = req.headers.cookie || "";
+  const sessionCookie = cookieHeader.split(";").map((part) => part.trim()).find((part) => part.startsWith("user_session=") || part.startsWith("__Host-user_session="));
+  if (sessionCookie) deleteUserSession(decodeURIComponent(sessionCookie.slice(sessionCookie.indexOf("=") + 1)));
+  clearUserSessionCookie(res);
+  res.status(204).end();
 });
 
 app.post("/api/update", requireAdmin, async (_req, res) => {
@@ -63,6 +211,7 @@ app.post("/api/update", requireAdmin, async (_req, res) => {
 
     try {
       const stats = migrateCsvToDb(outputCsv);
+      invalidateReadCaches();
       return res.json({ status: "success", scrape, migration: stats });
     } catch (migrationError) {
       return res.status(207).json({
@@ -80,18 +229,10 @@ app.post("/api/update", requireAdmin, async (_req, res) => {
 });
 
 app.post("/api/upload-csv", requireAdmin, async (req, res) => {
-  // Log the request for debugging
-  console.log("CSV upload request received");
-  console.log("Body type:", typeof req.body);
-  console.log("Body keys:", Object.keys(req.body || {}));
-  console.log("Body csv type:", typeof req.body?.csv);
-  console.log("Body csv length:", req.body?.csv?.length);
-
-  const schema = z.object({ csv: z.string().min(1) });
+  const schema = z.object({ csv: z.string().min(1) }).strict();
   const parsed = schema.safeParse(req.body);
   
   if (!parsed.success) {
-    console.error("Validation error:", parsed.error);
     let errorMsg = "Invalid CSV payload";
     if (parsed.error?.errors && Array.isArray(parsed.error.errors)) {
       errorMsg = parsed.error.errors.map(e => `${e.path.join(".")}: ${e.message}`).join("; ");
@@ -108,11 +249,10 @@ app.post("/api/upload-csv", requireAdmin, async (req, res) => {
     fs.writeFileSync(outputCsv, parsed.data.csv, "utf8");
 
     const stats = migrateCsvToDb(outputCsv);
-    console.log("CSV import successful:", stats);
+    invalidateReadCaches();
     return res.json({ status: "success", migration: stats });
   } catch (error) {
     const message = error instanceof Error ? error.message : "CSV migration failed";
-    console.error("CSV upload error:", message);
     return res.status(400).json({
       status: "error",
       error: message,
@@ -120,243 +260,147 @@ app.post("/api/upload-csv", requireAdmin, async (req, res) => {
   }
 });
 
-app.get("/api/courses", (_req, res) => {
-  const rows = db.prepare("SELECT course_code, course_name FROM courses ORDER BY course_code").all();
-  res.json(rows);
+app.get("/api/courses", requireUser, (_req, res) => {
+  if (!coursesCache) {
+    coursesCache = queries.getCourses();
+  }
+  res.json(coursesCache);
 });
 
-app.get("/api/search/students", (req, res) => {
+app.get("/api/search/students", requireUser, (req, res) => {
   const q = String(req.query.q || "").trim();
-  const normalized = normalizeArabic(q);
-  const rows = db
-    .prepare(
-      `SELECT student_id, student_name, student_name_ar
-       FROM students
-       WHERE student_id LIKE @id
-          OR student_name LIKE @name
-          OR student_name_ar LIKE @nameAr
-          OR student_name_normalized LIKE @normalized
-       ORDER BY student_name
-       LIMIT 30`,
-    )
-    .all({
-      id: `%${q}%`,
-      name: `%${q}%`,
-      nameAr: `%${q}%`,
-      normalized: `%${normalized}%`,
-    });
+  if (!q) return res.json([]);
+
+  const ftsQuery = buildFtsQuery(q);
+  const rows = queries.searchStudents({ id: `%${q}%`, ftsQuery });
   res.json(rows);
 });
 
-app.get("/api/search/schedule", (req, res) => {
+app.get("/api/search/schedule", requireUser, (req, res) => {
   const query = String(req.query.query || "").trim();
   const strict = String(req.query.strict || "0") === "1";
-  const normalized = normalizeArabic(query);
+  if (!query) return res.json([]);
 
-  const whereClause = strict
-    ? "s.student_id = @query"
-    : "(s.student_id = @query OR s.student_id LIKE @likeQ OR s.student_name LIKE @likeQ OR s.student_name_ar LIKE @likeQ OR s.student_name_normalized LIKE @likeN)";
+  const ftsQuery = buildFtsQuery(query);
 
-  const sql = `
-    SELECT
-      s.student_id, s.student_name, s.student_name_ar,
-      c.course_code, c.course_name,
-      ct.type_name as class_type,
-      ts.day_of_week, ts.start_time, ts.end_time,
-      cl.location, cl.group_number
-    FROM schedules sch
-    JOIN students s ON s.id = sch.student_id
-    JOIN classes cl ON cl.id = sch.class_id
-    JOIN courses c ON c.id = cl.course_id
-    JOIN class_types ct ON ct.id = cl.class_type_id
-    JOIN time_slots ts ON ts.id = cl.time_slot_id
-    WHERE ${whereClause}
-    ORDER BY ts.day_of_week, ts.start_time, c.course_code
-  `;
-
-  const rows = db.prepare(sql).all({ query, likeQ: `%${query}%`, likeN: `%${normalized}%` });
+  const rows = queries.searchSchedule({ query, id: `%${query}%`, ftsQuery }, strict);
   res.json(rows);
 });
 
-app.get("/api/class-roster", (req, res) => {
+app.get("/api/class-roster", requireUser, (req, res) => {
   const schema = z.object({
     courseCode: z.string().min(1),
     day: z.string().min(1),
     start: z.string().min(1),
     type: z.string().min(1),
     location: z.string().optional(),
-  });
+  }).strict();
 
   const parsed = schema.safeParse(req.query);
   if (!parsed.success) return res.status(400).json({ error: "Invalid roster query" });
 
   const q = parsed.data;
-  const locationCondition = q.location ? "AND cl.location = @location" : "";
-
-  const rows = db
-    .prepare(
-      `SELECT s.student_id, s.student_name, s.student_name_ar
-       FROM schedules sch
-       JOIN students s ON s.id = sch.student_id
-       JOIN classes cl ON cl.id = sch.class_id
-       JOIN courses c ON c.id = cl.course_id
-       JOIN class_types ct ON ct.id = cl.class_type_id
-       JOIN time_slots ts ON ts.id = cl.time_slot_id
-       WHERE c.course_code = @courseCode
-         AND ts.day_of_week = @day
-         AND ts.start_time = @start
-         AND ct.type_name = @type
-         ${locationCondition}
-       ORDER BY s.student_name`,
-    )
-    .all(q);
+  const rows = queries.classRoster({ ...q, location: q.location || null });
 
   res.json(rows);
 });
 
-app.get("/api/classmates", (req, res) => {
-  const schema = z.object({ courseCode: z.string().min(1), studentName: z.string().optional(), excludeStudentId: z.string().optional() });
+app.get("/api/classmates", requireUser, (req, res) => {
+  const schema = z.object({ courseCode: z.string().min(1), studentName: z.string().optional(), excludeStudentId: z.string().optional() }).strict();
   const parsed = schema.safeParse(req.query);
   if (!parsed.success) return res.status(400).json({ error: "Invalid classmates query" });
 
   const q = parsed.data;
-  const rows = db
-    .prepare(
-      `SELECT DISTINCT s.student_id, s.student_name, s.student_name_ar
-       FROM enrollments e
-       JOIN students s ON s.id = e.student_id
-       JOIN courses c ON c.id = e.course_id
-       WHERE c.course_code = @courseCode
-       ORDER BY s.student_name`,
-    )
-    .all(q)
-    .filter((student) => {
-      if (q.excludeStudentId && student.student_id === q.excludeStudentId) return false;
-      if (q.studentName && student.student_name === q.studentName) return false;
-      return true;
-    });
+  const rows = queries.classmates({
+    courseCode: q.courseCode,
+    excludeStudentId: q.excludeStudentId || null,
+    studentName: q.studentName || null,
+  });
 
   res.json(rows);
 });
 
-app.get("/api/class-students", (req, res) => {
+app.get("/api/class-students", requireUser, (req, res) => {
   const schema = z.object({ 
     courseCode: z.string().min(1), 
     classType: z.string().min(1),
     dayOfWeek: z.string().min(1),
     startTime: z.string().min(1),
     groupNumber: z.string().optional()
-  });
+  }).strict();
   const parsed = schema.safeParse(req.query);
   if (!parsed.success) return res.status(400).json({ error: "Invalid class students query" });
 
   const { courseCode, classType, dayOfWeek, startTime, groupNumber } = parsed.data;
   
-  let query = `
-    SELECT DISTINCT s.student_id, s.student_name, s.student_name_ar
-    FROM schedules sc
-    JOIN students s ON s.id = sc.student_id
-    JOIN classes cl ON cl.id = sc.class_id
-    JOIN courses c ON c.id = cl.course_id
-    JOIN class_types ct ON ct.id = cl.class_type_id
-    JOIN time_slots ts ON ts.id = cl.time_slot_id
-    WHERE c.course_code = ?
-      AND ct.class_type = ?
-      AND ts.day_of_week = ?
-      AND ts.start_time = ?`;
-  
-  const params = [courseCode, classType, dayOfWeek, startTime];
-  
-  if (groupNumber) {
-    query += ` AND cl.group_number = ?`;
-    params.push(groupNumber);
-  }
-  
-  query += ` ORDER BY s.student_name`;
-  
-  const rows = db.prepare(query).all(...params);
+  const rows = queries.classStudents({
+    courseCode,
+    classType,
+    dayOfWeek,
+    startTime,
+    groupNumber: groupNumber || null,
+  });
   res.json(rows);
 });
 
-app.get("/api/cohort-classmates", (req, res) => {
-  const schema = z.object({ courseCode: z.string().min(1), studentId: z.string().min(4) });
+app.get("/api/cohort-classmates", requireUser, (req, res) => {
+  const schema = z.object({ courseCode: z.string().min(1), studentId: z.string().min(4) }).strict();
   const parsed = schema.safeParse(req.query);
   if (!parsed.success) return res.status(400).json({ error: "Invalid cohort query" });
 
   const { courseCode, studentId } = parsed.data;
   const targetYear = studentId.slice(1, 3);
 
-  const rows = db
-    .prepare(
-      `SELECT DISTINCT s.student_id, s.student_name, s.student_name_ar
-       FROM enrollments e
-       JOIN students s ON s.id = e.student_id
-       JOIN courses c ON c.id = e.course_id
-       WHERE c.course_code = ?
-       ORDER BY s.student_name`,
-    )
-    .all(courseCode)
-    .filter((student) => student.student_id !== studentId && student.student_id.slice(1, 3) === targetYear);
+  const rows = queries.cohortClassmates({ courseCode, studentId, targetYear });
 
   res.json(rows);
 });
 
-app.post("/api/timetables", (req, res) => {
-  console.log("=== /api/timetables REQUEST ===");
-  console.log("Body:", JSON.stringify(req.body, null, 2));
-  console.log("Headers:", req.headers);
-  
-  const schema = z.object({
-    selectedCourses: z.array(z.string()).min(1),
-    index: z.number().int().min(0).default(0),
-    maxResults: z.number().int().min(1).max(200).default(50)
+const busyTimeSlotSchema = z
+  .object({
+    dayOfWeek: z.string().trim().min(1),
+    startTime: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/),
+    endTime: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/),
+  })
+  .refine((slot) => slot.endTime > slot.startTime, {
+    message: "endTime must be after startTime",
+    path: ["endTime"],
   });
 
-  const parsed = schema.safeParse(req.body || {});
-  console.log("Parsed result:", parsed);
-  
-  if (!parsed.success) {
-    console.log("Validation errors:", parsed.error.errors);
-    return res.status(400).json({ error: "Invalid timetable payload", details: parsed.error.errors });
-  }
+const studentsByCoursesSchema = z.object({
+  courseCodes: z.array(z.string()).min(1),
+  matchType: z.enum(["all", "any"]),
+  busyTimeSlot: busyTimeSlotSchema.optional(),
+  availabilityMode: z.enum(["busy", "free"]).default("busy"),
+}).strict();
 
-  const { selectedCourses, index, maxResults } = parsed.data;
+function normalizeCourseCodes(courseCodes) {
+  return [...new Set(courseCodes.map((code) => String(code).trim().toUpperCase()).filter(Boolean))];
+}
 
-  try {
-    console.log("🔍 buildTimetableCombinations called with:", { selectedCourses, maxResults });
-    const combinations = buildTimetableCombinations(db, selectedCourses, maxResults);
-    console.log("📊 Combinations generated:", combinations.length, "total");
-
-    if (!combinations.length) {
-      console.log("⚠️ No combinations found");
-      return res.status(404).json({ error: "No valid timetable combinations found" });
-    }
-
-    const safeIndex = Math.min(index, combinations.length - 1);
-    const response = {
-      current_index: safeIndex,
-      total: combinations.length,
-      has_next: safeIndex < combinations.length - 1,
-      timetable: combinations[safeIndex],
-    };
-    console.log("✅ Sending response:", { current_index: response.current_index, total: response.total, has_next: response.has_next, timetable_length: response.timetable.length });
-    return res.json(response);
-  } catch (error) {
-    return res.status(400).json({
-      error: error instanceof Error ? error.message : "Failed to generate timetables"
-    });
-  }
-});
-
-app.post("/api/students-by-courses", (req, res) => {
-  const schema = z.object({ courseCodes: z.array(z.string()).min(1), matchType: z.enum(["all", "any"]) });
-  const parsed = schema.safeParse(req.body || {});
-  if (!parsed.success) return res.status(400).json({ error: "Invalid students-by-courses payload" });
-
-  const { courseCodes, matchType } = parsed.data;
+function getStudentsByCoursesRows(courseCodes, matchType, busyTimeSlot, availabilityMode = "busy") {
   const placeholders = courseCodes.map(() => "?").join(",");
+  const havingClauses = [matchType === "all" ? "matched_count = ?" : "matched_count >= 1"];
+  const params = [...courseCodes, ...(matchType === "all" ? [courseCodes.length] : [])];
 
-  const rows = db
+  if (busyTimeSlot) {
+    const overlapExistsClause = `EXISTS (
+      SELECT 1
+      FROM schedules sch2
+      JOIN classes cl2 ON cl2.id = sch2.class_id
+      JOIN time_slots ts2 ON ts2.id = cl2.time_slot_id
+      WHERE sch2.student_id = s.id
+        AND ts2.day_of_week = ?
+        AND ts2.start_time < ?
+        AND ts2.end_time > ?
+    )`;
+
+    havingClauses.push(availabilityMode === "free" ? `NOT ${overlapExistsClause}` : overlapExistsClause);
+
+    params.push(busyTimeSlot.dayOfWeek, busyTimeSlot.endTime, busyTimeSlot.startTime);
+  }
+
+  return db
     .prepare(
       `SELECT s.student_id, s.student_name, s.student_name_ar, COUNT(DISTINCT c.course_code) as matched_count
        FROM enrollments e
@@ -364,20 +408,153 @@ app.post("/api/students-by-courses", (req, res) => {
        JOIN courses c ON c.id = e.course_id
        WHERE c.course_code IN (${placeholders})
        GROUP BY s.id
-       HAVING ${matchType === "all" ? "matched_count = ?" : "matched_count >= 1"}
+       HAVING ${havingClauses.join(" AND ")}
        ORDER BY s.student_name`,
     )
-    .all(...courseCodes, ...(matchType === "all" ? [courseCodes.length] : []));
+    .all(...params);
+}
+
+function classifyClassType(typeName) {
+  const normalizedType = String(typeName || "").toLowerCase();
+
+  if (normalizedType.includes("lecture") || normalizedType.includes("lec")) {
+    return "lec";
+  }
+
+  if (
+    normalizedType.includes("tutorial") ||
+    normalizedType.includes("tut") ||
+    normalizedType.includes("section") ||
+    normalizedType.includes("lab") ||
+    normalizedType.includes("practical")
+  ) {
+    return "tut";
+  }
+
+  return "other";
+}
+
+function formatClassSlot(dayOfWeek, startTime, endTime, groupNumber) {
+  const groupSuffix = groupNumber && String(groupNumber) !== "0" ? ` (G${groupNumber})` : "";
+  return `${dayOfWeek} ${startTime}-${endTime}${groupSuffix}`;
+}
+
+function buildExportFileName(courseCodes) {
+  const rawName = `${courseCodes.join("-")}.xlsx`;
+
+  return rawName
+    .replace(/[<>:"/\\|?*\u0000-\u001F]/g, "_")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+app.post("/api/students-by-courses", requireUser, (req, res) => {
+  const parsed = studentsByCoursesSchema.safeParse(req.body || {});
+  if (!parsed.success) return res.status(400).json({ error: "Invalid students-by-courses payload" });
+
+  const matchType = parsed.data.matchType;
+  const courseCodes = normalizeCourseCodes(parsed.data.courseCodes);
+  const busyTimeSlot = parsed.data.busyTimeSlot;
+  const availabilityMode = parsed.data.availabilityMode;
+  if (!courseCodes.length) return res.status(400).json({ error: "No valid course codes provided" });
+
+  const rows = getStudentsByCoursesRows(courseCodes, matchType, busyTimeSlot, availabilityMode);
 
   res.json({ count: rows.length, students: rows });
 });
 
-app.post("/api/friends-and-enemies/analyze", (req, res) => {
+app.post("/api/students-by-courses/export", requireUser, (req, res) => {
+  const parsed = studentsByCoursesSchema.safeParse(req.body || {});
+  if (!parsed.success) return res.status(400).json({ error: "Invalid students-by-courses export payload" });
+
+  const matchType = parsed.data.matchType;
+  const courseCodes = normalizeCourseCodes(parsed.data.courseCodes);
+  const busyTimeSlot = parsed.data.busyTimeSlot;
+  const availabilityMode = parsed.data.availabilityMode;
+  if (!courseCodes.length) return res.status(400).json({ error: "No valid course codes provided" });
+
+  const students = getStudentsByCoursesRows(courseCodes, matchType, busyTimeSlot, availabilityMode);
+  const headers = ["Code", "Name", ...courseCodes.flatMap((code) => [`${code} Lec`, `${code} Tut`])];
+
+  const classDetailsMap = new Map();
+
+  if (students.length > 0) {
+    const studentIds = students.map((student) => student.student_id);
+    const studentPlaceholders = studentIds.map(() => "?").join(",");
+    const coursePlaceholders = courseCodes.map(() => "?").join(",");
+
+    const classRows = db
+      .prepare(
+        `SELECT
+          s.student_id,
+          c.course_code,
+          ct.type_name as class_type,
+          ts.day_of_week,
+          ts.start_time,
+          ts.end_time,
+          cl.group_number
+         FROM schedules sch
+         JOIN students s ON s.id = sch.student_id
+         JOIN classes cl ON cl.id = sch.class_id
+         JOIN courses c ON c.id = cl.course_id
+         JOIN class_types ct ON ct.id = cl.class_type_id
+         JOIN time_slots ts ON ts.id = cl.time_slot_id
+         WHERE s.student_id IN (${studentPlaceholders})
+           AND c.course_code IN (${coursePlaceholders})
+         ORDER BY s.student_id, c.course_code, ct.type_name, ts.day_of_week, ts.start_time`,
+      )
+      .all(...studentIds, ...courseCodes);
+
+    for (const row of classRows) {
+      const key = `${row.student_id}::${row.course_code}`;
+      if (!classDetailsMap.has(key)) {
+        classDetailsMap.set(key, { lec: new Set(), tut: new Set() });
+      }
+
+      const slot = formatClassSlot(row.day_of_week, row.start_time, row.end_time, row.group_number);
+      const classType = classifyClassType(row.class_type);
+      const details = classDetailsMap.get(key);
+
+      if (classType === "lec") {
+        details.lec.add(slot);
+      } else if (classType === "tut") {
+        details.tut.add(slot);
+      } else {
+        details.tut.add(`${row.class_type}: ${slot}`);
+      }
+    }
+  }
+
+  const rows = students.map((student) => {
+    const row = [student.student_id, student.student_name];
+
+    for (const courseCode of courseCodes) {
+      const details = classDetailsMap.get(`${student.student_id}::${courseCode}`);
+      row.push(details ? Array.from(details.lec).join(" | ") : "");
+      row.push(details ? Array.from(details.tut).join(" | ") : "");
+    }
+
+    return row;
+  });
+
+  const worksheet = XLSX.utils.aoa_to_sheet([headers, ...rows]);
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, worksheet, "Students");
+
+  const buffer = XLSX.write(workbook, { type: "buffer", bookType: "xlsx" });
+  const fileName = buildExportFileName(courseCodes);
+
+  res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(fileName)}`);
+  return res.send(buffer);
+});
+
+app.post("/api/friends-and-enemies/analyze", requireUser, (req, res) => {
   const schema = z.object({
     studentId: z.string().min(1),
     friendIds: z.array(z.string()).default([]),
     enemyIds: z.array(z.string()).default([]),
-  });
+  }).strict();
 
   const parsed = schema.safeParse(req.body || {});
   if (!parsed.success) return res.status(400).json({ error: "Invalid friends-and-enemies payload" });
@@ -495,6 +672,88 @@ app.post("/api/friends-and-enemies/analyze", (req, res) => {
   });
 
   res.json({ analysis: analyzed });
+});
+
+// --- STATISTICS ROUTES ---
+app.post('/api/statistics/upload', requireAdmin, (req, res) => {
+  const rowSchema = z.object({
+    course_code: z.string().trim().min(1).max(32),
+    semester: z.string().trim().min(1).max(64),
+    program: z.string().trim().min(1).max(128),
+    grade: z.string().trim().min(1).max(4),
+    student_count: z.number().int().nonnegative(),
+  }).strict();
+  const parsed = z.object({ data: z.array(rowSchema).min(1).max(5000) }).strict().safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "Invalid data format" });
+  const { data } = parsed.data;
+
+  try {
+    if (db.prepare) {
+      // If using better-sqlite3
+      const stmt = db.prepare('INSERT INTO course_statistics (course_code, semester, program, grade, student_count) VALUES (?, ?, ?, ?, ?)');
+      const insertMany = db.transaction((rows) => {
+        for (const row of rows) stmt.run(row.course_code, row.semester, row.program, row.grade, row.student_count);
+      });
+      insertMany(data);
+      res.json({ success: true, count: data.length });
+    } else {
+      // If using standard sqlite3
+      const placeholders = data.map(() => '(?, ?, ?, ?, ?)').join(',');
+      const values = data.flatMap(d => [d.course_code, d.semester, d.program, d.grade, d.student_count]);
+      db.run(`INSERT INTO course_statistics (course_code, semester, program, grade, student_count) VALUES ${placeholders}`, values, function(err) {
+        if (err) return res.status(500).json({ error: err.message });
+        res.json({ success: true, count: data.length });
+      });
+    }
+  } catch (error) {
+    console.error("Upload error:", error);
+    res.status(500).json({ error: "Failed to save statistics" });
+  }
+});
+
+app.get('/api/statistics', requireUser, (req, res) => {
+  const { course, semester, program } = req.query;
+
+  // Let the Database do the heavy lifting and math!
+  let query = 'SELECT grade, SUM(student_count) as student_count FROM course_statistics WHERE 1=1';
+  const params = [];
+
+  if (course && course !== 'All') { query += ' AND course_code = ?'; params.push(course); }
+  if (semester && semester !== 'All') { query += ' AND semester = ?'; params.push(semester); }
+  if (program && program !== 'All') { query += ' AND program = ?'; params.push(program); }
+
+  query += ' GROUP BY grade';
+
+  try {
+    if (db.prepare) {
+      const rows = db.prepare(query).all(...params);
+      res.json(rows);
+    } else {
+      db.all(query, params, (err, rows) => {
+        if (err) return res.status(500).json({ error: err.message });
+        res.json(rows);
+      });
+    }
+  } catch (error) {
+    res.status(500).json({ error: "Failed to fetch statistics" });
+  }
+});
+
+app.get('/api/statistics/filters', requireUser, (req, res) => {
+  const query = 'SELECT DISTINCT course_code, semester, program FROM course_statistics';
+  try {
+    if (db.prepare) {
+      const rows = db.prepare(query).all();
+      res.json(rows);
+    } else {
+      db.all(query, [], (err, rows) => {
+        if (err) return res.status(500).json({ error: err.message });
+        res.json(rows);
+      });
+    }
+  } catch (error) {
+    res.status(500).json({ error: "Failed to fetch filters" });
+  }
 });
 
 const port = Number(process.env.PORT || 4000);

@@ -10,7 +10,7 @@ if (!email) {
   process.exit(1);
 }
 
-const hash = await bcrypt.hash(password, 10);
+const hash = await bcrypt.hash(password, 12);
 
 db.prepare(
   `INSERT INTO admins (email, password_hash)

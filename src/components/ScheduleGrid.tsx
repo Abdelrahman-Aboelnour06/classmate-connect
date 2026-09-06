@@ -7,7 +7,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Users, Loader2 } from "lucide-react";
+import { CircleNotch, UsersThree } from "@phosphor-icons/react";
 import { useQuery } from "@tanstack/react-query";
 
 type ScheduleItem = {
@@ -24,6 +24,12 @@ type ScheduleItem = {
   original_end_time?: string;
 };
 
+type Classmate = {
+  student_id: string;
+  student_name: string;
+  student_name_ar: string | null;
+};
+
 const DAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 
 function getTimeSlotIndex(time: string): number {
@@ -36,7 +42,20 @@ function getMinuteOffset(time: string): number {
   return minute;
 }
 
-export default function ScheduleGrid({ schedule, highlightCourses }: { schedule: ScheduleItem[]; highlightCourses?: Set<string> }) {
+function getTimeInMinutes(time: string): number {
+  const [hour, minute] = time.split(":").map(Number);
+  return hour * 60 + minute;
+}
+
+export default function ScheduleGrid({
+  schedule,
+  highlightCourses,
+  onClassmateSelect,
+}: {
+  schedule: ScheduleItem[];
+  highlightCourses?: Set<string>;
+  onClassmateSelect?: (student: Classmate) => void;
+}) {
   const [selectedClass, setSelectedClass] = useState<ScheduleItem | null>(null);
 
   const { data: classmates, isLoading: loadingClassmates } = useQuery({
@@ -100,14 +119,16 @@ export default function ScheduleGrid({ schedule, highlightCourses }: { schedule:
   }, [schedule, timeSlots]);
 
   const getClassHeight = (item: ScheduleItem) => {
-    const startHour = getTimeSlotIndex(item.start_time);
-    const endHour = getTimeSlotIndex(item.end_time);
-    const endMinute = getMinuteOffset(item.end_time);
-    
-    let duration = endHour - startHour;
-    if (endMinute > 0) duration += endMinute / 60;
-    
-    return `${Math.max(duration * 4, 4)}rem`;
+    const durationMinutes = Math.max(
+      getTimeInMinutes(item.end_time) - getTimeInMinutes(item.start_time),
+      30,
+    );
+    return `${(durationMinutes / 60) * 4}rem`;
+  };
+
+  const getClassTop = (time: string) => {
+    const minuteOffsetRem = (getMinuteOffset(time) / 60) * 4;
+    return `${0.5 + minuteOffsetRem}rem`;
   };
 
   return (
@@ -156,21 +177,22 @@ export default function ScheduleGrid({ schedule, highlightCourses }: { schedule:
                       <div
                         key={idx}
                         onClick={() => setSelectedClass(item)}
-                        className={`rounded-lg border p-1.5 text-xs transition-colors absolute top-2 cursor-pointer hover:shadow-lg ${
+                        className={`rounded-lg border p-1.5 text-xs transition-colors absolute cursor-pointer hover:shadow-lg ${
                           isHighlighted
-                            ? "border-secondary bg-secondary/20 text-secondary-foreground font-medium shadow-md"
+                            ? "border-yellow-500 bg-yellow-300 text-yellow-950 font-medium shadow-md dark:border-yellow-400 dark:bg-yellow-700 dark:text-yellow-50"
                             : "border-border bg-muted/50 text-muted-foreground hover:bg-muted/70"
                         }`}
                         style={{
                           minHeight: getClassHeight(item),
+                          top: getClassTop(item.start_time),
                           left: `calc(${leftOffset}% + 0.5rem)`,
                           width: totalItems > 1 ? `calc(${itemWidth}% - 0.75rem)` : 'calc(100% - 1rem)',
                           zIndex: idx + 1,
                         }}
                       >
-                        <div className="font-semibold leading-tight">{item.course_code}</div>
-                        <div className="text-xs opacity-75 leading-tight">{item.class_type}</div>
-                        <div className="text-xs opacity-75 leading-tight">
+                        <div className="font-mono font-semibold leading-tight">{item.course_code}</div>
+                        <div className="mt-1 inline-flex rounded-full bg-[#E7F0F7] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-[#42637A]">{item.class_type}</div>
+                        <div className="font-mono text-xs opacity-75 leading-tight">
                           {item.start_time.padStart(5, "0")} - {item.end_time.padStart(5, "0")}
                         </div>
                         {item.location && <div className="text-xs opacity-75 truncate">{item.location}</div>}
@@ -188,19 +210,24 @@ export default function ScheduleGrid({ schedule, highlightCourses }: { schedule:
         <DialogContent className="max-w-md max-h-[80vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
-              <Users className="h-5 w-5" />
+              <UsersThree weight="bold" className="h-5 w-5" />
               Classmates in {selectedClass?.course_code}
             </DialogTitle>
-            <DialogDescription>
-              {selectedClass?.class_type} • {selectedClass?.day_of_week} at {selectedClass?.start_time}
-              {selectedClass?.group_number && ` • Group ${selectedClass.group_number}`}
+            <DialogDescription className="space-y-1">
+              {selectedClass?.course_name && (
+                <span className="block text-foreground">{selectedClass.course_name}</span>
+              )}
+              <span className="block">
+                {selectedClass?.class_type} • {selectedClass?.day_of_week} at {selectedClass?.start_time}
+                {selectedClass?.group_number && ` • Group ${selectedClass.group_number}`}
+              </span>
             </DialogDescription>
           </DialogHeader>
 
           <div className="mt-4">
             {loadingClassmates ? (
               <div className="flex items-center justify-center py-8">
-                <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+                <CircleNotch weight="bold" className="h-6 w-6 animate-spin text-muted-foreground" />
               </div>
             ) : classmates && classmates.length > 0 ? (
               <div className="space-y-2">
@@ -211,10 +238,14 @@ export default function ScheduleGrid({ schedule, highlightCourses }: { schedule:
                   {classmates.map((student) => (
                     <div
                       key={student.student_id}
-                      className="p-3 rounded-lg bg-muted/50 hover:bg-muted transition-colors"
+                      className="p-3 rounded-lg bg-muted/50 hover:bg-muted transition-colors cursor-pointer"
+                      onClick={() => {
+                        onClassmateSelect?.(student);
+                        setSelectedClass(null);
+                      }}
                     >
                       <div className="font-medium text-sm">{student.student_name}</div>
-                      <div className="text-xs text-muted-foreground">{student.student_id}</div>
+                      <div className="font-mono text-xs text-muted-foreground">{student.student_id}</div>
                     </div>
                   ))}
                 </div>

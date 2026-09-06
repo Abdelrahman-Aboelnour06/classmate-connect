@@ -56,32 +56,14 @@ const findClassTypeId = db.prepare("SELECT id FROM class_types WHERE type_name =
 const findTimeSlotId = db.prepare("SELECT id FROM time_slots WHERE day_of_week = ? AND start_time = ? AND end_time = ?");
 const findClassId = db.prepare("SELECT id FROM classes WHERE course_id = ? AND time_slot_id = ? AND class_type_id = ? AND location = ? AND group_number = ?");
 
-function normalizeRecord(row, rowIndex = 0) {
-  // Handle cases where properties might be undefined
+function normalizeRecord(row) {
   const getValue = (val) => String(val || "").trim();
-  
-  // Log column names for first row to debug
-  if (rowIndex === 0) {
-    console.log("CSV columns detected:", Object.keys(row));
-    console.log("First row data:", row);
-  }
-  
-  // Direct column access - no fancy detection needed
-  // Your CSV uses: type, day, start, end, group
+
   const startTime = getValue(row.start || row.start_time || "");
   const endTime = getValue(row.end || row.end_time || "");
   const dayOfWeek = getValue(row.day || row.day_of_week || "");
   const classType = getValue(row.type || row.class_type || "");
   const groupNumber = getValue(row.group || row.group_number || "");
-  
-  if (rowIndex === 0) {
-    console.log("Column mapping result:", {
-      startTime,
-      endTime,
-      dayOfWeek,
-      classType,
-    });
-  }
   
   return {
     student_id: getValue(row.student_id || ""),
@@ -98,7 +80,7 @@ function normalizeRecord(row, rowIndex = 0) {
   };
 }
 
-const migrateOne = db.transaction((record) => {
+function migrateOne(record, caches) {
   insertStudent.run({
     student_id: record.student_id,
     student_name: record.student_name,
@@ -115,57 +97,198 @@ const migrateOne = db.transaction((record) => {
   insertClassType.run(record.class_type);
   insertTimeSlot.run(record.day_of_week, record.start_time, record.end_time);
 
-  const student = findStudentId.get(record.student_id);
-  const course = findCourseId.get(record.course_code);
-  const classType = findClassTypeId.get(record.class_type);
-  const timeSlot = findTimeSlotId.get(record.day_of_week, record.start_time, record.end_time);
+  const timeSlotKey = `${record.day_of_week}\u0000${record.start_time}\u0000${record.end_time}`;
+  const student = caches.students.get(record.student_id) || findStudentId.get(record.student_id);
+  const course = caches.courses.get(record.course_code) || findCourseId.get(record.course_code);
+  const classType = caches.classTypes.get(record.class_type) || findClassTypeId.get(record.class_type);
+  const timeSlot = caches.timeSlots.get(timeSlotKey)
+    || findTimeSlotId.get(record.day_of_week, record.start_time, record.end_time);
 
   if (!student || !course || !classType || !timeSlot) return false;
 
+  caches.students.set(record.student_id, student);
+  caches.courses.set(record.course_code, course);
+  caches.classTypes.set(record.class_type, classType);
+  caches.timeSlots.set(timeSlotKey, timeSlot);
+
   insertClass.run(course.id, timeSlot.id, classType.id, record.location, record.group_number);
-  const klass = findClassId.get(course.id, timeSlot.id, classType.id, record.location, record.group_number);
+  const classKey = `${course.id}\u0000${timeSlot.id}\u0000${classType.id}\u0000${record.location}\u0000${record.group_number}`;
+  const klass = caches.classes.get(classKey)
+    || findClassId.get(course.id, timeSlot.id, classType.id, record.location, record.group_number);
 
   if (!klass) return false;
+
+  caches.classes.set(classKey, klass);
 
   insertEnrollment.run(student.id, course.id);
   insertSchedule.run(student.id, klass.id);
 
   return true;
-});
-
-const clearTransaction = db.transaction(() => {
-  // Disable foreign key constraints temporarily for cleanup
-  db.prepare("PRAGMA foreign_keys = OFF").run();
-  
-  try {
-    // Delete in correct order to respect foreign key constraints
-    const tables = ["schedules", "classes", "enrollments", "students", "courses", "time_slots", "class_types"];
-    
-    for (const table of tables) {
-      const result = db.prepare(`DELETE FROM ${table}`).run();
-      console.log(`  Cleared ${table}: ${result.changes} rows deleted`);
-    }
-  } finally {
-    // Always re-enable foreign keys
-    db.prepare("PRAGMA foreign_keys = ON").run();
-  }
-});
-
-function clearAllData() {
-  try {
-    console.log("Starting database clear transaction...");
-    clearTransaction();
-    console.log("Database cleared successfully");
-  } catch (e) {
-    // Try to re-enable foreign keys even on error
-    try {
-      db.prepare("PRAGMA foreign_keys = ON").run();
-    } catch {
-      // Ignore
-    }
-    throw new Error(`Failed to clear database: ${e instanceof Error ? e.message : "Unknown error"}`);
-  }
 }
+
+function migrateAll(records, errors) {
+  let imported = 0;
+  const caches = {
+    students: new Map(),
+    courses: new Map(),
+    classTypes: new Map(),
+    timeSlots: new Map(),
+    classes: new Map(),
+  };
+
+  for (const { record, rowNumber } of records) {
+    try {
+      if (migrateOne(record, caches)) {
+        imported += 1;
+      } else {
+        errors.push(`Row ${rowNumber}: Failed to insert schedule (possibly missing student, course, or class type)`);
+      }
+    } catch (error) {
+      errors.push(`Row ${rowNumber}: ${error instanceof Error ? error.message : "Unknown error"}`);
+    }
+  }
+
+  return imported;
+}
+
+const reconcileAndMigrate = db.transaction((records, errors) => {
+  db.exec(`
+    CREATE TEMP TABLE IF NOT EXISTS desired_students (student_id TEXT PRIMARY KEY);
+    CREATE TEMP TABLE IF NOT EXISTS desired_courses (course_code TEXT PRIMARY KEY);
+    CREATE TEMP TABLE IF NOT EXISTS desired_classes (
+      course_code TEXT NOT NULL,
+      class_type TEXT NOT NULL,
+      day_of_week TEXT NOT NULL,
+      start_time TEXT NOT NULL,
+      end_time TEXT NOT NULL,
+      location TEXT NOT NULL,
+      group_number TEXT NOT NULL,
+      PRIMARY KEY (course_code, class_type, day_of_week, start_time, end_time, location, group_number)
+    );
+    CREATE TEMP TABLE IF NOT EXISTS desired_enrollments (
+      student_id TEXT NOT NULL,
+      course_code TEXT NOT NULL,
+      PRIMARY KEY (student_id, course_code)
+    );
+    CREATE TEMP TABLE IF NOT EXISTS desired_schedules (
+      student_id TEXT NOT NULL,
+      course_code TEXT NOT NULL,
+      class_type TEXT NOT NULL,
+      day_of_week TEXT NOT NULL,
+      start_time TEXT NOT NULL,
+      end_time TEXT NOT NULL,
+      location TEXT NOT NULL,
+      group_number TEXT NOT NULL,
+      PRIMARY KEY (student_id, course_code, class_type, day_of_week, start_time, end_time, location, group_number)
+    );
+  `);
+
+  db.exec(`
+    DELETE FROM desired_students;
+    DELETE FROM desired_courses;
+    DELETE FROM desired_classes;
+    DELETE FROM desired_enrollments;
+    DELETE FROM desired_schedules;
+  `);
+
+  const desiredStudent = db.prepare("INSERT OR IGNORE INTO desired_students (student_id) VALUES (?)");
+  const desiredCourse = db.prepare("INSERT OR IGNORE INTO desired_courses (course_code) VALUES (?)");
+  const desiredClass = db.prepare(`
+    INSERT OR IGNORE INTO desired_classes
+      (course_code, class_type, day_of_week, start_time, end_time, location, group_number)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `);
+  const desiredEnrollment = db.prepare("INSERT OR IGNORE INTO desired_enrollments (student_id, course_code) VALUES (?, ?)");
+  const desiredSchedule = db.prepare(`
+    INSERT OR IGNORE INTO desired_schedules
+      (student_id, course_code, class_type, day_of_week, start_time, end_time, location, group_number)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+
+  for (const { record } of records) {
+    desiredStudent.run(record.student_id);
+    desiredCourse.run(record.course_code);
+    desiredClass.run(
+      record.course_code,
+      record.class_type,
+      record.day_of_week,
+      record.start_time,
+      record.end_time,
+      record.location,
+      record.group_number,
+    );
+    desiredEnrollment.run(record.student_id, record.course_code);
+    desiredSchedule.run(
+      record.student_id,
+      record.course_code,
+      record.class_type,
+      record.day_of_week,
+      record.start_time,
+      record.end_time,
+      record.location,
+      record.group_number,
+    );
+  }
+
+  db.exec(`
+    DELETE FROM schedules
+    WHERE id IN (
+      SELECT sch.id
+      FROM schedules sch
+      JOIN students s ON s.id = sch.student_id
+      JOIN classes cl ON cl.id = sch.class_id
+      JOIN courses c ON c.id = cl.course_id
+      JOIN class_types ct ON ct.id = cl.class_type_id
+      JOIN time_slots ts ON ts.id = cl.time_slot_id
+      WHERE NOT EXISTS (
+        SELECT 1 FROM desired_schedules d
+        WHERE d.student_id = s.student_id
+          AND d.course_code = c.course_code
+          AND d.class_type = ct.type_name
+          AND d.day_of_week = ts.day_of_week
+          AND d.start_time = ts.start_time
+          AND d.end_time = ts.end_time
+          AND d.location = cl.location
+          AND d.group_number = cl.group_number
+      )
+    );
+
+    DELETE FROM enrollments
+    WHERE id IN (
+      SELECT e.id
+      FROM enrollments e
+      JOIN students s ON s.id = e.student_id
+      JOIN courses c ON c.id = e.course_id
+      WHERE NOT EXISTS (
+        SELECT 1 FROM desired_enrollments d
+        WHERE d.student_id = s.student_id AND d.course_code = c.course_code
+      )
+    );
+
+    DELETE FROM classes
+    WHERE NOT EXISTS (
+      SELECT 1 FROM desired_classes d
+      JOIN courses c ON c.course_code = d.course_code
+      JOIN class_types ct ON ct.type_name = d.class_type
+      JOIN time_slots ts ON ts.day_of_week = d.day_of_week
+        AND ts.start_time = d.start_time AND ts.end_time = d.end_time
+      WHERE d.course_code = (SELECT course_code FROM courses WHERE id = classes.course_id)
+        AND d.class_type = (SELECT type_name FROM class_types WHERE id = classes.class_type_id)
+        AND d.day_of_week = (SELECT day_of_week FROM time_slots WHERE id = classes.time_slot_id)
+        AND d.start_time = (SELECT start_time FROM time_slots WHERE id = classes.time_slot_id)
+        AND d.end_time = (SELECT end_time FROM time_slots WHERE id = classes.time_slot_id)
+        AND d.location = classes.location
+        AND d.group_number = classes.group_number
+    );
+
+    DELETE FROM courses WHERE NOT EXISTS (SELECT 1 FROM desired_courses d WHERE d.course_code = courses.course_code);
+    DELETE FROM students WHERE NOT EXISTS (SELECT 1 FROM desired_students d WHERE d.student_id = students.student_id);
+    DELETE FROM time_slots WHERE NOT EXISTS (SELECT 1 FROM classes WHERE classes.time_slot_id = time_slots.id);
+    DELETE FROM class_types WHERE NOT EXISTS (SELECT 1 FROM classes WHERE classes.class_type_id = class_types.id);
+  `);
+
+  return migrateAll(records, errors);
+});
 
 export function migrateCsvToDb(csvPath) {
   if (!fs.existsSync(csvPath)) {
@@ -175,50 +298,6 @@ export function migrateCsvToDb(csvPath) {
   const csvContent = fs.readFileSync(csvPath, "utf8");
   if (!csvContent.trim()) {
     throw new Error("CSV file is empty");
-  }
-
-  // Clear all old data before importing new data
-  console.log("Starting database clear...");
-  clearAllData();
-  console.log("Database clear completed");
-
-  // Verify database is empty
-  const preImportStats = {
-    students: db.prepare("SELECT COUNT(*) as c FROM students").get().c,
-    courses: db.prepare("SELECT COUNT(*) as c FROM courses").get().c,
-    classes: db.prepare("SELECT COUNT(*) as c FROM classes").get().c,
-    enrollments: db.prepare("SELECT COUNT(*) as c FROM enrollments").get().c,
-    schedules: db.prepare("SELECT COUNT(*) as c FROM schedules").get().c,
-  };
-
-  console.log("Database state before import:", preImportStats);
-
-  if (preImportStats.students > 0 || preImportStats.courses > 0) {
-    console.warn("WARNING: Old data still present in database despite clear attempt");
-    console.warn("Attempting alternative clear strategy...");
-    
-    // Try alternative clear with explicit individual deletes
-    try {
-      db.prepare("DELETE FROM schedules WHERE 1=1").run();
-      db.prepare("DELETE FROM classes WHERE 1=1").run();
-      db.prepare("DELETE FROM enrollments WHERE 1=1").run();
-      db.prepare("DELETE FROM students WHERE 1=1").run();
-      db.prepare("DELETE FROM courses WHERE 1=1").run();
-      db.prepare("DELETE FROM time_slots WHERE 1=1").run();
-      db.prepare("DELETE FROM class_types WHERE 1=1").run();
-      
-      const retryStats = {
-        students: db.prepare("SELECT COUNT(*) as c FROM students").get().c,
-        courses: db.prepare("SELECT COUNT(*) as c FROM courses").get().c,
-      };
-      console.log("After retry clear:", retryStats);
-      
-      if (retryStats.students > 0 || retryStats.courses > 0) {
-        throw new Error("Database clear failed - old data still present after retry");
-      }
-    } catch (retryError) {
-      throw new Error(`Failed to clear database: ${retryError instanceof Error ? retryError.message : "Unknown error"}`);
-    }
   }
 
   let rows;
@@ -238,8 +317,7 @@ export function migrateCsvToDb(csvPath) {
 
   // Validate headers - accept both naming conventions
   const firstRow = rows[0];
-  const columnNames = Object.keys(firstRow);
-  
+
   // Check for required columns with case-insensitive, flexible matching
   const hasColumn = (row, ...names) => {
     return names.some(name => 
@@ -248,8 +326,6 @@ export function migrateCsvToDb(csvPath) {
   };
   
   const requiredBase = ["student_id", "student_name", "course_code", "course_name"];
-  const requiredTime = ["day", "start", "end"]; // either short or long names
-  
   // Check base required columns
   for (const col of requiredBase) {
     if (!hasColumn(firstRow, col)) {
@@ -266,12 +342,12 @@ export function migrateCsvToDb(csvPath) {
   if (!hasStart) throw new Error(`CSV missing start time column (start_time or start)`);
   if (!hasEnd) throw new Error(`CSV missing end time column (end_time or end)`);
 
-  let imported = 0;
   const errors = [];
-  
+  const records = [];
+
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
-    const record = normalizeRecord(row, i);
+    const record = normalizeRecord(row);
     
     // Detailed validation
     if (!record.student_id) {
@@ -307,23 +383,15 @@ export function migrateCsvToDb(csvPath) {
       continue;
     }
 
-    try {
-      if (migrateOne(record)) {
-        imported += 1;
-      } else {
-        errors.push(`Row ${i + 1}: Failed to insert schedule (possibly missing student, course, or class type)`);
-      }
-    } catch (e) {
-      const errorMsg = e instanceof Error ? e.message : "Unknown error";
-      // Don't report every duplicate constraint error if we're expecting some
-      if (errorMsg.includes("UNIQUE constraint") || errorMsg.includes("constraint failed")) {
-        // These are expected in some cases due to duplicates in CSV
-        errors.push(`Row ${i + 1}: ${errorMsg}`);
-      } else {
-        errors.push(`Row ${i + 1}: ${errorMsg}`);
-      }
-    }
+    records.push({ record, rowNumber: i + 1 });
   }
+
+  if (records.length === 0) {
+    throw new Error("CSV contains no valid data rows");
+  }
+
+  const imported = reconcileAndMigrate(records, errors);
+  db.prepare("INSERT INTO student_search(student_search) VALUES ('rebuild')").run();
 
   const postImportStats = {
     students: db.prepare("SELECT COUNT(*) as c FROM students").get().c,
@@ -343,14 +411,6 @@ export function migrateCsvToDb(csvPath) {
     totalRows: rows.length,
     errors: errors.length > 0 ? errors : undefined,
   };
-
-  console.log("Import statistics:", {
-    imported,
-    total: rows.length,
-    errorCount: errors.length,
-    studentCount: postImportStats.students,
-    courseCount: postImportStats.courses,
-  });
 
   if (errors.length > 0) {
     const errorSummary = errors.slice(0, 5).join("\n");

@@ -25,7 +25,7 @@ export default function LoginPage() {
 
     try {
       const data = await loginAdmin(email, password);
-      setAuth(data.token, data.admin.email);
+      setAuth(data.token ?? null, data.admin.email);
       navigate(redirectPath, { replace: true });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Login failed");

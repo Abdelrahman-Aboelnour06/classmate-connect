@@ -52,6 +52,11 @@ function parseRosterSpreadsheet(filePath, classMeta) {
   return out;
 }
 
+async function loadSourcePage(page, sourceUrl) {
+  await page.goto(sourceUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
+  await page.waitForSelector("table tr", { timeout: 60000 });
+}
+
 export async function scrapeToMasterCsv(options = {}) {
   const sourceUrl = options.sourceUrl || process.env.SCRAPE_SOURCE_URL || "https://stds.eng.cu.edu.eg/ClassList.aspx?s=1";
   const outputCsv = options.outputCsv || path.join(process.cwd(), "backend", "data", "master_schedule.csv");
@@ -60,16 +65,16 @@ export async function scrapeToMasterCsv(options = {}) {
   ensureCleanDir(tempDir);
   const browser = await chromium.launch({ headless: true });
   const context = await browser.newContext({ acceptDownloads: true });
-  const page = await context.newPage();
-
+  const discoveryPage = await context.newPage();
   const allRows = [];
 
   try {
-    await page.goto(sourceUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
-    await page.waitForTimeout(1500);
+    await loadSourcePage(discoveryPage, sourceUrl);
+    const trHandles = await discoveryPage.locator("table tr").all();
+    const tasks = [];
 
-    const trHandles = await page.locator("table tr").all();
-    for (const tr of trHandles) {
+    for (let rowIndex = 0; rowIndex < trHandles.length; rowIndex += 1) {
+      const tr = trHandles[rowIndex];
       const cells = await tr.locator("td").allTextContents();
       if (cells.length < 6) continue;
 
@@ -78,35 +83,45 @@ export async function scrapeToMasterCsv(options = {}) {
         continue;
       }
 
-      const link = tr.locator("a").first();
-      const linkCount = await link.count();
-      if (!linkCount) continue;
-
-      ensureCleanDir(tempDir);
-
-      let downloadedPath = "";
-      try {
-        const [download] = await Promise.all([
-          page.waitForEvent("download", { timeout: 20000 }),
-          link.click(),
-        ]);
-
-        downloadedPath = path.join(tempDir, download.suggestedFilename() || `${Date.now()}.xlsx`);
-        await download.saveAs(downloadedPath);
-      } catch {
-        continue;
-      }
-
-      if (!downloadedPath || !fs.existsSync(downloadedPath) || fs.statSync(downloadedPath).size === 0) {
-        continue;
-      }
-
-      const rosterRows = parseRosterSpreadsheet(downloadedPath, classMeta);
-      allRows.push(...rosterRows);
-
-      ensureCleanDir(tempDir);
+      if (await tr.locator("a").first().count()) tasks.push({ rowIndex, classMeta });
     }
+
+    let nextTask = 0;
+    const requestedWorkers = Number.parseInt(process.env.SCRAPE_WORKERS || "4", 10);
+    const workerCount = Math.min(Math.max(requestedWorkers || 4, 1), tasks.length || 1);
+    const workers = Array.from({ length: workerCount }, async (_, workerId) => {
+      const page = await context.newPage();
+      try {
+        await loadSourcePage(page, sourceUrl);
+
+        while (nextTask < tasks.length) {
+          const task = tasks[nextTask++];
+          const row = page.locator("table tr").nth(task.rowIndex);
+          const link = row.locator("a").first();
+          let downloadedPath = "";
+
+          try {
+            const [download] = await Promise.all([
+              page.waitForEvent("download", { timeout: 20000 }),
+              link.click(),
+            ]);
+            downloadedPath = path.join(tempDir, `${workerId}-${task.rowIndex}-${download.suggestedFilename() || `${Date.now()}.xlsx`}`);
+            await download.saveAs(downloadedPath);
+          } catch {
+            continue;
+          }
+
+          if (!downloadedPath || !fs.existsSync(downloadedPath) || fs.statSync(downloadedPath).size === 0) continue;
+          allRows.push(...parseRosterSpreadsheet(downloadedPath, task.classMeta));
+        }
+      } finally {
+        await page.close();
+      }
+    });
+
+    await Promise.all(workers);
   } finally {
+    await discoveryPage.close();
     await context.close();
     await browser.close();
     ensureCleanDir(tempDir);

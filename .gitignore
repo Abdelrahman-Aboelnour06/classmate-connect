@@ -11,6 +11,10 @@ node_modules
 dist
 dist-ssr
 *.local
+backend/.env
+backend/data/users.db
+backend/data/users.db-shm
+backend/data/users.db-wal
 
 # Editor directories and files
 .vscode/*
