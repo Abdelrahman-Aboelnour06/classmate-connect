@@ -14,6 +14,10 @@ usersDb.exec(`
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     email TEXT NOT NULL UNIQUE,
     username TEXT NOT NULL UNIQUE,
+    full_name TEXT NOT NULL DEFAULT '',
+    student_code TEXT NOT NULL DEFAULT '',
+    two_factor_secret TEXT,
+    two_factor_enabled INTEGER NOT NULL DEFAULT 0,
     password_hash TEXT NOT NULL,
     terms_accepted_at TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -32,12 +36,25 @@ usersDb.exec(`
   CREATE INDEX IF NOT EXISTS idx_user_sessions_expires_at ON user_sessions(expires_at);
 `);
 
+for (const column of [
+  "ALTER TABLE users ADD COLUMN full_name TEXT NOT NULL DEFAULT ''",
+  "ALTER TABLE users ADD COLUMN student_code TEXT NOT NULL DEFAULT ''",
+  "ALTER TABLE users ADD COLUMN two_factor_secret TEXT",
+  "ALTER TABLE users ADD COLUMN two_factor_enabled INTEGER NOT NULL DEFAULT 0",
+]) {
+  try {
+    usersDb.exec(column);
+  } catch (error) {
+    if (!(error instanceof Error) || !error.message.includes("duplicate column name")) throw error;
+  }
+}
+
 const insertSession = usersDb.prepare(`
   INSERT INTO user_sessions (user_id, token_hash, expires_at)
   VALUES (?, ?, ?)
 `);
 const findSession = usersDb.prepare(`
-  SELECT u.id, u.email, u.username
+  SELECT u.id, u.email, u.username, u.full_name, u.student_code
   FROM user_sessions s
   JOIN users u ON u.id = s.user_id
   WHERE s.token_hash = ? AND s.expires_at > CURRENT_TIMESTAMP

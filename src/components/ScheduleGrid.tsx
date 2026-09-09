@@ -177,10 +177,10 @@ export default function ScheduleGrid({
                       <div
                         key={idx}
                         onClick={() => setSelectedClass(item)}
-                        className={`rounded-lg border p-1.5 text-xs transition-colors absolute cursor-pointer hover:shadow-lg ${
+                        className={`rounded-lg border p-1.5 text-xs transition-all absolute cursor-pointer hover:-translate-y-0.5 hover:shadow-lg ${
                           isHighlighted
-                            ? "border-yellow-500 bg-yellow-300 text-yellow-950 font-medium shadow-md dark:border-yellow-400 dark:bg-yellow-700 dark:text-yellow-50"
-                            : "border-border bg-muted/50 text-muted-foreground hover:bg-muted/70"
+                            ? "border-yellow-500 bg-yellow-300 text-yellow-950 font-medium shadow-md hover:border-yellow-600 hover:bg-yellow-400 dark:border-yellow-300 dark:bg-yellow-400 dark:text-yellow-950 dark:hover:border-yellow-200 dark:hover:bg-yellow-300"
+                            : "border-border bg-muted/50 text-muted-foreground hover:border-slate-400 hover:bg-muted dark:hover:border-slate-500 dark:hover:bg-slate-800"
                         }`}
                         style={{
                           minHeight: getClassHeight(item),
@@ -191,7 +191,7 @@ export default function ScheduleGrid({
                         }}
                       >
                         <div className="font-mono font-semibold leading-tight">{item.course_code}</div>
-                        <div className="mt-1 inline-flex rounded-full bg-[#E7F0F7] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-[#42637A]">{item.class_type}</div>
+                        <div className="mt-1 inline-flex rounded-full bg-[#E7F0F7] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-[#42637A] dark:bg-slate-700 dark:text-slate-100">{item.class_type}</div>
                         <div className="font-mono text-xs opacity-75 leading-tight">
                           {item.start_time.padStart(5, "0")} - {item.end_time.padStart(5, "0")}
                         </div>

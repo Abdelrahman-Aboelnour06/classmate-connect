@@ -30,6 +30,7 @@ npm --prefix backend install
 - Set `ADMIN_EMAIL` to your email
 - Keep/change `ADMIN_PASSWORD` (default `adminpass`)
 - Set `JWT_SECRET` to a long random secret. The backend refuses to start without it.
+- Student accounts can enable authenticator-app 2FA from their Profile page. To enable email-code recovery, set the SMTP variables in `backend/.env` using a Gmail/Google Workspace app password. Never commit `SMTP_PASSWORD`.
 
 4. Seed admin account:
 ```sh

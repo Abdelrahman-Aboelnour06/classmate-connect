@@ -290,12 +290,7 @@ const reconcileAndMigrate = db.transaction((records, errors) => {
   return migrateAll(records, errors);
 });
 
-export function migrateCsvToDb(csvPath) {
-  if (!fs.existsSync(csvPath)) {
-    throw new Error(`CSV not found: ${csvPath}`);
-  }
-
-  const csvContent = fs.readFileSync(csvPath, "utf8");
+export function validateCsvContent(csvContent) {
   if (!csvContent.trim()) {
     throw new Error("CSV file is empty");
   }
@@ -385,6 +380,17 @@ export function migrateCsvToDb(csvPath) {
 
     records.push({ record, rowNumber: i + 1 });
   }
+
+  return { rows, records, errors };
+}
+
+export function migrateCsvToDb(csvPath) {
+  if (!fs.existsSync(csvPath)) {
+    throw new Error(`CSV not found: ${csvPath}`);
+  }
+
+  const csvContent = fs.readFileSync(csvPath, "utf8");
+  const { rows, records, errors } = validateCsvContent(csvContent);
 
   if (records.length === 0) {
     throw new Error("CSV contains no valid data rows");

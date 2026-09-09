@@ -246,8 +246,13 @@ export default function StudentsByCoursesPage() {
               return (
                 <button
                   key={course.course_code}
+                  type="button"
                   onClick={() => toggleCourse(course.course_code)}
-                  className={`rounded-lg border px-3 py-2 text-left text-sm ${isSelected ? "border-secondary bg-secondary/10" : "border-border"}`}
+                  aria-pressed={isSelected}
+                  className={`rounded-lg border px-3 py-2 text-left text-sm transition-all hover:-translate-y-0.5 hover:shadow-md ${isSelected
+                    ? "border-yellow-500 bg-yellow-300 text-yellow-950 shadow-sm hover:border-yellow-600 hover:bg-yellow-400 dark:border-yellow-300 dark:bg-yellow-400 dark:text-yellow-950 dark:hover:border-yellow-200 dark:hover:bg-yellow-300"
+                    : "border-border bg-background hover:border-slate-400 hover:bg-muted dark:hover:border-slate-500 dark:hover:bg-slate-800"
+                    }`}
                 >
                   <p className="font-medium">{course.course_code}</p>
                   <p className="text-xs text-muted-foreground">{course.course_name}</p>

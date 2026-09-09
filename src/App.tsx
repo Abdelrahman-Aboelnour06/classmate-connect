@@ -13,6 +13,7 @@ import LoginPage from "./pages/LoginPage";
 import UserLoginPage from "./pages/UserLoginPage";
 import TermsPage from "./pages/TermsPage";
 import StatisticsPage from "./pages/StatisticsPage"; // <-- Added this import
+import ProfilePage from "./pages/ProfilePage";
 import { AuthProvider } from "./lib/auth-context";
 import RequireAdmin from "./components/RequireAdmin";
 import RequireUser from "./components/RequireUser";
@@ -36,6 +37,7 @@ const App = () => (
               <Route path="/students-by-courses" element={<RequireUser><StudentsByCoursesPage /></RequireUser>} />
               <Route path="/friends" element={<RequireUser><FriendsPage /></RequireUser>} />
               <Route path="/statistics" element={<RequireUser><StatisticsPage /></RequireUser>} />
+              <Route path="/profile" element={<RequireUser><ProfilePage /></RequireUser>} />
               <Route path="/login" element={<LoginPage />} />
               <Route path="/user-login" element={<UserLoginPage />} />
               <Route path="/terms" element={<TermsPage />} />

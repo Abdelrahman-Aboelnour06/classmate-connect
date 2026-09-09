@@ -10,7 +10,7 @@ import XLSX from "xlsx";
 import { z } from "zod";
 import { db } from "./db.js";
 import { normalizeArabic } from "./utils.js";
-import { migrateCsvToDb } from "./migration.js";
+import { migrateCsvToDb, validateCsvContent } from "./migration.js";
 import { scrapeToMasterCsv } from "./scraper.js";
 import {
   clearAdminSessionCookie,
@@ -25,6 +25,17 @@ import {
 } from "./auth.js";
 import { queries } from "./queries.js";
 import { createUserSession, deleteUserSession, usersDb } from "./users-db.js";
+import {
+  createLoginChallenge,
+  createRegistrationChallenge,
+  createQrCode,
+  createTwoFactorSetup,
+  enableUserTwoFactor,
+  getUserTwoFactor,
+  sendEmailCode,
+  verifyLoginChallenge,
+  verifyRegistrationChallenge,
+} from "./two-factor.js";
 
 const app = express();
 const isProduction = process.env.NODE_ENV === "production";
@@ -112,12 +123,12 @@ function passesBotCheck(body) {
   return body.website === "" && Number.isFinite(body.startedAt) && Date.now() - body.startedAt >= 800;
 }
 
-const findUserByEmailQuery = usersDb.prepare("SELECT id, email, username, password_hash FROM users WHERE email = ?");
-const findUserByUsernameQuery = usersDb.prepare("SELECT id, email, username, password_hash FROM users WHERE username = ?");
+const findUserByEmailQuery = usersDb.prepare("SELECT id, email, username, full_name, student_code, password_hash, two_factor_secret, two_factor_enabled FROM users WHERE email = ?");
+const findUserByUsernameQuery = usersDb.prepare("SELECT id, email, username, full_name, student_code, password_hash, two_factor_secret, two_factor_enabled FROM users WHERE username = ?");
 const findAdminByEmailQuery = db.prepare("SELECT id, email, password_hash FROM admins WHERE email = ?");
 const insertUserQuery = usersDb.prepare(`
-  INSERT INTO users (email, username, password_hash, terms_accepted_at)
-  VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+  INSERT INTO users (email, username, full_name, student_code, password_hash, terms_accepted_at)
+  VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 `);
 
 app.get("/api/auth/csrf", (_req, res) => {
@@ -148,17 +159,48 @@ app.post("/api/auth/logout", (req, res) => {
 
 app.post("/api/users/register", authLimiter, accountAuthLimiter, async (req, res) => {
   const schema = z
-    .object({ email: userEmail, username, password, termsAccepted: z.literal(true), ...botCheck.shape })
+    .object({
+      email: userEmail.refine((value) => value.endsWith("@eng-st.cu.edu.eg"), "Use your @eng-st.cu.edu.eg email"),
+      username,
+      fullName: z.string().trim().min(2).max(100),
+      studentCode: z.string().trim().regex(/^[A-Za-z0-9-]{3,24}$/),
+      password,
+      termsAccepted: z.literal(true),
+      ...botCheck.shape,
+    })
     .strict();
   const parsed = schema.safeParse(req.body);
   if (!parsed.success || !passesBotCheck(parsed.data)) return res.status(400).json({ error: "Invalid registration details" });
 
   try {
     const passwordHash = await bcrypt.hash(parsed.data.password, 12);
-    const result = insertUserQuery.run(parsed.data.email, parsed.data.username, passwordHash);
+    const verificationToken = await createRegistrationChallenge({
+      email: parsed.data.email,
+      username: parsed.data.username,
+      fullName: parsed.data.fullName,
+      studentCode: parsed.data.studentCode,
+      passwordHash,
+    });
+    if (!verificationToken) return res.status(503).json({ error: "Email verification is not configured. Contact the site administrator." });
+    return res.status(202).json({ emailVerificationRequired: true, verificationToken, expiresInMinutes: 5 });
+  } catch {
+    return res.status(400).json({ error: "Unable to start email verification" });
+  }
+});
+
+app.post("/api/users/register/verify", authLimiter, async (req, res) => {
+  const schema = z.object({ verificationToken: z.string().min(20), code: z.string().regex(/^\d{6}$/) }).strict();
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "Enter the six-digit email verification code." });
+
+  const registration = verifyRegistrationChallenge(parsed.data.verificationToken, parsed.data.code);
+  if (!registration) return res.status(400).json({ error: "Invalid or expired email verification code." });
+
+  try {
+    const result = insertUserQuery.run(registration.email, registration.username, registration.fullName, registration.studentCode, registration.passwordHash);
     const session = createUserSession(Number(result.lastInsertRowid));
     setUserSessionCookie(res, session.token, 12 * 60 * 60 * 1000);
-    return res.status(201).json({ user: { email: parsed.data.email, username: parsed.data.username } });
+    return res.status(201).json({ user: { email: registration.email, username: registration.username, fullName: registration.fullName, studentCode: registration.studentCode } });
   } catch {
     return res.status(400).json({ error: "Unable to create account" });
   }
@@ -175,7 +217,7 @@ app.post("/api/users/login", authLimiter, accountAuthLimiter, async (req, res) =
     const validAdmin = admin ? await bcrypt.compare(parsed.data.password, admin.password_hash) : false;
     if (admin && validAdmin) {
       setAdminSessionCookie(res, signAdminToken(admin));
-      return res.json({ user: { email: admin.email, username: "admin" }, admin: true });
+      return res.json({ user: { email: admin.email, username: "admin", fullName: "Administrator", studentCode: "" }, admin: true });
     }
   }
 
@@ -185,13 +227,57 @@ app.post("/api/users/login", authLimiter, accountAuthLimiter, async (req, res) =
   const valid = user ? await bcrypt.compare(parsed.data.password, user.password_hash) : false;
   if (!user || !valid) return res.status(401).json({ error: "Invalid credentials" });
 
+  if (user.two_factor_enabled) {
+    return res.json({ twoFactorRequired: true, challengeToken: createLoginChallenge(user), methods: ["totp", "email"] });
+  }
+
   const session = createUserSession(user.id);
   setUserSessionCookie(res, session.token, 12 * 60 * 60 * 1000);
-  return res.json({ user: { email: user.email, username: user.username } });
+  return res.json({ user: { email: user.email, username: user.username, fullName: user.full_name, studentCode: user.student_code } });
+});
+
+app.post("/api/users/2fa/email", async (req, res) => {
+  const schema = z.object({ challengeToken: z.string().min(20) }).strict();
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success || !(await sendEmailCode(parsed.data.challengeToken))) {
+    return res.status(400).json({ error: "Email verification is not configured or the challenge expired." });
+  }
+  return res.json({ status: "sent" });
+});
+
+app.post("/api/users/2fa/verify", async (req, res) => {
+  const schema = z.object({ challengeToken: z.string().min(20), method: z.enum(["totp", "email"]), code: z.string().regex(/^\d{6}$/) }).strict();
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "Enter a valid six-digit verification code." });
+
+  const user = await verifyLoginChallenge(parsed.data.challengeToken, parsed.data.method, parsed.data.code);
+  if (!user) return res.status(401).json({ error: "Invalid or expired verification code." });
+
+  const session = createUserSession(user.id);
+  setUserSessionCookie(res, session.token, 12 * 60 * 60 * 1000);
+  return res.json({ user: { email: user.email, username: user.username, fullName: user.full_name, studentCode: user.student_code } });
+});
+
+app.get("/api/users/2fa/setup", requireUser, async (req, res) => {
+  const user = getUserTwoFactor(req.user.id);
+  if (!user) return res.status(404).json({ error: "User account not found" });
+  if (user.two_factor_enabled) return res.json({ enabled: true });
+
+  const setup = createTwoFactorSetup(user);
+  return res.json({ enabled: false, secret: setup.secret, qrCode: await createQrCode(setup.uri) });
+});
+
+app.post("/api/users/2fa/setup", requireUser, async (req, res) => {
+  const schema = z.object({ secret: z.string().min(16), code: z.string().regex(/^\d{6}$/) }).strict();
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success || !(await enableUserTwoFactor(req.user.id, parsed.data.secret, parsed.data.code))) {
+    return res.status(400).json({ error: "Invalid authenticator code. Scan the QR code and try again." });
+  }
+  return res.json({ enabled: true });
 });
 
 app.get("/api/users/me", requireUser, (req, res) => {
-  res.json({ user: { email: req.user.email, username: req.user.username } });
+  res.json({ user: { email: req.user.email, username: req.user.username, fullName: req.user.full_name || req.user.username, studentCode: req.user.student_code || "" } });
 });
 
 app.post("/api/users/logout", (req, res) => {
@@ -256,6 +342,30 @@ app.post("/api/upload-csv", requireAdmin, async (req, res) => {
     return res.status(400).json({
       status: "error",
       error: message,
+    });
+  }
+});
+
+app.post("/api/validate-csv", requireAdmin, (req, res) => {
+  const schema = z.object({ csv: z.string().min(1) }).strict();
+  const parsed = schema.safeParse(req.body);
+
+  if (!parsed.success) {
+    return res.status(400).json({ status: "error", error: "Expected { csv: \"content\" }" });
+  }
+
+  try {
+    const validation = validateCsvContent(parsed.data.csv);
+    return res.json({
+      status: "success",
+      totalRows: validation.rows.length,
+      validRows: validation.records.length,
+      errors: validation.errors,
+    });
+  } catch (error) {
+    return res.status(400).json({
+      status: "error",
+      error: error instanceof Error ? error.message : "CSV validation failed",
     });
   }
 });

@@ -184,15 +184,15 @@ export async function logoutAdmin() {
   return apiRequest<void>("/api/auth/logout", { method: "POST" });
 }
 
-export async function registerUser(input: { email: string; username: string; password: string; termsAccepted: boolean; website: string; startedAt: number }) {
-  return apiRequest<{ user: { email: string; username: string } }>("/api/users/register", {
+export async function registerUser(input: { email: string; username: string; fullName: string; studentCode: string; password: string; termsAccepted: boolean; website: string; startedAt: number }) {
+  return apiRequest<{ user?: { email: string; username: string }; emailVerificationRequired?: boolean; verificationToken?: string; expiresInMinutes?: number }>("/api/users/register", {
     method: "POST",
     body: JSON.stringify(input),
   });
 }
 
 export async function loginUser(input: { identifier: string; password: string; website: string; startedAt: number }) {
-  return apiRequest<{ user: { email: string; username: string }; admin?: boolean }>("/api/users/login", {
+  return apiRequest<{ user?: { email: string; username: string; fullName: string; studentCode: string }; admin?: boolean; twoFactorRequired?: boolean; challengeToken?: string; methods?: string[] }>("/api/users/login", {
     method: "POST",
     body: JSON.stringify(input),
   });
@@ -361,5 +361,49 @@ export async function fetchStatisticsFilters(): Promise<any[]> {
 }
 
 export async function getCurrentUser() {
-  return apiRequest<{ user: { email: string; username: string } }>("/api/users/me");
+  return apiRequest<{ user: { email: string; username: string; fullName: string; studentCode: string } }>("/api/users/me");
+}
+
+export async function validateCsv(token: string | null | undefined, csv: string): Promise<{
+  totalRows: number;
+  validRows: number;
+  errors: string[];
+}> {
+  return apiRequest("/api/validate-csv", {
+    method: "POST",
+    headers: token ? { authorization: `Bearer ${token}` } : undefined,
+    body: JSON.stringify({ csv }),
+  });
+}
+
+export async function sendTwoFactorEmail(challengeToken: string) {
+  return apiRequest<{ status: string }>("/api/users/2fa/email", {
+    method: "POST",
+    body: JSON.stringify({ challengeToken }),
+  });
+}
+
+export async function verifyTwoFactor(challengeToken: string, method: "totp" | "email", code: string) {
+  return apiRequest<{ user: { email: string; username: string; fullName: string; studentCode: string } }>("/api/users/2fa/verify", {
+    method: "POST",
+    body: JSON.stringify({ challengeToken, method, code }),
+  });
+}
+
+export async function getTwoFactorSetup() {
+  return apiRequest<{ enabled: boolean; secret?: string; qrCode?: string }>("/api/users/2fa/setup");
+}
+
+export async function enableTwoFactor(secret: string, code: string) {
+  return apiRequest<{ enabled: boolean }>("/api/users/2fa/setup", {
+    method: "POST",
+    body: JSON.stringify({ secret, code }),
+  });
+}
+
+export async function verifyRegistrationEmail(verificationToken: string, code: string) {
+  return apiRequest<{ user: { email: string; username: string; fullName: string; studentCode: string } }>("/api/users/register/verify", {
+    method: "POST",
+    body: JSON.stringify({ verificationToken, code }),
+  });
 }

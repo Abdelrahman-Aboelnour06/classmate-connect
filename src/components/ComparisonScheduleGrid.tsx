@@ -263,7 +263,7 @@ export default function ComparisonScheduleGrid({
                     <div
                       key={`a-${idx}`}
                       onClick={() => setSelectedClass(item)}
-                      className="rounded-lg border p-1 text-xs transition-colors absolute cursor-pointer hover:shadow-lg"
+                      className="rounded-lg border p-1 text-xs transition-all absolute cursor-pointer hover:-translate-y-0.5 hover:shadow-lg hover:border-yellow-500 dark:hover:border-yellow-200"
                       style={{
                         minHeight: getClassHeight(item),
                         zIndex: 1 + idx,
@@ -292,13 +292,13 @@ export default function ComparisonScheduleGrid({
                         left: "50%",
                         top: getClassTop(item.start_time, idx),
                         width: "calc(50% - 0.25rem)",
-                        backgroundColor: "rgb(236 201 75)", // yellow for Student B
-                        borderColor: "rgb(202 138 4)", // amber border
+                        backgroundColor: "rgb(250 204 21)", // vibrant yellow for Student B
+                        borderColor: "rgb(234 179 8)", // amber border
                       }}
                     >
-                      <div className="font-semibold leading-tight text-amber-900">{item.course_code}</div>
-                      <div className="text-xs opacity-75 leading-tight text-amber-900">{item.class_type}</div>
-                      <div className="text-xs opacity-75 leading-tight text-amber-900">
+                      <div className="font-semibold leading-tight text-yellow-950">{item.course_code}</div>
+                      <div className="text-xs opacity-75 leading-tight text-yellow-950">{item.class_type}</div>
+                      <div className="text-xs opacity-75 leading-tight text-yellow-950">
                         {item.start_time} - {item.end_time}
                       </div>
                     </div>

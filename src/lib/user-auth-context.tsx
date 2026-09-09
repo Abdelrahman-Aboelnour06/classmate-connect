@@ -1,7 +1,7 @@
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
 import { getCurrentUser } from "@/lib/api";
 
-type User = { email: string; username: string };
+export type User = { email: string; username: string; fullName: string; studentCode: string };
 
 type UserAuthContextValue = {
   user: User | null;

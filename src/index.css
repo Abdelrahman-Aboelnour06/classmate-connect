@@ -17,6 +17,8 @@
 
     --primary: 220 15% 12%;
     --primary-foreground: 40 20% 98%;
+    --brand: 43 94% 58%;
+    --brand-strong: 38 78% 31%;
 
     --secondary: 45 70% 90%;
     --secondary-foreground: 38 80% 30%;
@@ -69,6 +71,8 @@
 
     --primary: 40 15% 92%;
     --primary-foreground: 220 20% 9%;
+    --brand: 43 90% 62%;
+    --brand-strong: 43 95% 78%;
 
     --secondary: 220 15% 20%;
     --secondary-foreground: 40 15% 92%;
@@ -102,9 +106,15 @@
     @apply border-border;
   }
 
+  :focus-visible {
+    outline: 3px solid hsl(var(--brand));
+    outline-offset: 3px;
+  }
+
   body {
     @apply bg-background text-foreground font-sans antialiased;
     font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+    overflow-x: hidden;
   }
 
   h1, h2, h3, h4, h5, h6 {
@@ -112,6 +122,10 @@
   }
 
   body { line-height: 1.6; }
+
+  button, a, input, select, textarea {
+    -webkit-tap-highlight-color: transparent;
+  }
 }
 
 @layer utilities {
@@ -123,5 +137,9 @@
   }
   .shadow-elevated {
     box-shadow: var(--shadow-elevated);
+  }
+  .brand-mark {
+    background: hsl(var(--brand));
+    color: hsl(var(--brand-strong));
   }
 }
