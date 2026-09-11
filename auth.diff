@@ -1,0 +1,45 @@
+diff --git a/backend/server.js b/backend/server.js
+--- a/backend/server.js
++++ b/backend/server.js
+@@
+-import {
+-  clearAdminSessionCookie,
+-  clearUserSessionCookie,
+-  createCsrfToken,
+-  csrfProtection,
+-  requireAdmin,
+-  requireUser,
+-  setAdminSessionCookie,
+-  setUserSessionCookie,
+-  signAdminToken,
+-} from "./auth.js";
++import {
++  clearAdminSessionCookie,
++  clearUserSessionCookie,
++  createCsrfToken,
++  csrfProtection,
++  requireAdmin,
++  requireUser,
++  setAdminSessionCookie,
++  setUserSessionCookie,
++  signAdminToken,
++} from "./auth.js"; // all no-ops now
+@@
+-app.post("/api/auth/login", authLimiter, accountAuthLimiter, async (req, res) => {
+-  const schema = z.object({ email: userEmail, password: z.string().min(1), ...botCheck.shape }).strict();
+-  const parsed = schema.safeParse(req.body);
+-  if (!parsed.success || !passesBotCheck(parsed.data)) return res.status(401).json({ error: "Invalid credentials" });
+-
+-  const admin = findAdminByEmailQuery.get(parsed.data.email);
+-  if (!admin) return res.status(401).json({ error: "Invalid credentials" });
+-
+-  const valid = await bcrypt.compare(parsed.data.password, admin.password_hash);
+-  if (!valid) return res.status(401).json({ error: "Invalid credentials" });
+-
+-  setAdminSessionCookie(res, signAdminToken(admin));
+-  return res.json({ admin: { email: admin.email } });
+-});
++app.post("/api/auth/login", (_req, res) => {
++  // Auth disabled — always succeed.
++  return res.json({ admin: { email: process.env.ADMIN_EMAIL || "local@localhost" } });
++});

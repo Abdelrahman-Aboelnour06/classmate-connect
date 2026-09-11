@@ -14,7 +14,7 @@ from webdriver_manager.chrome import ChromeDriverManager
 
 
 DEFAULT_URL = "https://stds.eng.cu.edu.eg/ClassList.aspx?s=1"
-DEFAULT_OUTPUT = "master_schedule_scraped.csv"
+DEFAULT_OUTPUT = "Fall-27-1.csv"
 DEFAULT_WORKERS = 8
 DEFAULT_DOWNLOAD_TIMEOUT = 20
 DEFAULT_STAGGER_SECONDS = 2
